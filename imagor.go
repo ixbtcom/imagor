@@ -22,7 +22,7 @@ import (
 )
 
 // Version imagor version
-const Version = "1.8.5"
+const Version = "1.9.1"
 
 // Loader image loader interface
 type Loader interface {
@@ -326,7 +326,6 @@ func (app *Imagor) Do(r *http.Request, p imagorpath.Params) (blob *Blob, err err
 			r.Header.Set("Imagor-Raw", "1")
 			isRaw = true
 		case "preview":
-			r.Header.Set("Cache-Control", "no-cache")
 			hasPreview = true // disable result storage on preview() filter
 		}
 		// exclude utility filters from result path
@@ -345,6 +344,12 @@ func (app *Imagor) Do(r *http.Request, p imagorpath.Params) (blob *Blob, err err
 				Name: "format",
 				Args: "avif",
 			})
+			if app.AutoWebP && strings.Contains(accept, "image/webp") {
+				p.Filters = append(p.Filters, imagorpath.Filter{
+					Name: "fallback_format",
+					Args: "webp",
+				})
+			}
 			r.Header.Set("Imagor-Auto-Format", "avif") // response Vary: Accept header
 			isPathChanged = true
 		} else if app.AutoWebP && strings.Contains(accept, "image/webp") {
@@ -546,6 +551,19 @@ func (app *Imagor) handlePostRequest(w http.ResponseWriter, r *http.Request) {
 	// Process the upload through normal imagor pipeline
 	blob, err := checkBlob(app.Do(r, p))
 	if err != nil {
+		if app.ResponseRawOnError && !isBlobEmpty(blob) {
+			e := WrapError(err)
+			app.Logger.Warn("response-raw-on-error",
+				zap.Any("params", p),
+				zap.Error(err),
+				zap.Int("status", e.Code))
+
+			w.WriteHeader(e.Code)
+			app.setResponseHeaders(w, r, blob, p)
+			reader, size, _ := blob.NewReader()
+			writeBody(w, r, reader, size)
+			return
+		}
 		app.handleErrorResponse(w, r, err)
 		return
 	}
@@ -643,7 +661,11 @@ func fromStorages(
 	r *http.Request, storages []Storage, key string,
 ) (blob *Blob, origin Storage, err error) {
 	for _, storage := range storages {
-		b, e := checkBlob(storage.Get(r, key))
+		b, e := storage.Get(r, key)
+		if b != nil {
+			b.setFanout(false)
+		}
+		b, e = checkBlob(b, e)
 		if !isBlobEmpty(b) {
 			blob = b
 			if e == nil {
@@ -677,7 +699,11 @@ func (app *Imagor) fromStoragesAndLoaders(
 			// For POST uploads, try loaders even with empty image key
 			if r.Method == http.MethodPost {
 				for _, loader := range loaders {
-					b, e := checkBlob(loader.Get(r, image))
+					b, e := loader.Get(r, image)
+					if b != nil {
+						b.setFanout(image != "" && len(storages) > 0)
+					}
+					b, e = checkBlob(b, e)
 					if !isBlobEmpty(b) {
 						blob = b
 						if e == nil {
@@ -707,7 +733,11 @@ func (app *Imagor) fromStoragesAndLoaders(
 		}
 	}
 	for _, loader := range loaders {
-		b, e := checkBlob(loader.Get(r, image))
+		b, e := loader.Get(r, image)
+		if b != nil {
+			b.setFanout(image != "" && len(storages) > 0)
+		}
+		b, e = checkBlob(b, e)
 		if !isBlobEmpty(b) {
 			blob = b
 			if e == nil {

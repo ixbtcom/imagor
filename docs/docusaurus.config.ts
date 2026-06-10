@@ -3,8 +3,8 @@ import type { Config } from "@docusaurus/types";
 import type * as Preset from "@docusaurus/preset-classic";
 
 const config: Config = {
-  title: "imagor documentation",
-  tagline: "Fast, secure image processing server and Go library",
+  title: "imagor docs",
+  tagline: "Fast, secure libvips-based image processing server and Go library",
   favicon: "img/icon.png",
 
   // Set the production url of your site here
@@ -52,10 +52,6 @@ const config: Config = {
         theme: {
           customCss: "./src/css/custom.css",
         },
-        gtag: {
-          trackingID: "G-JJR6HR323W",
-          anonymizeIP: true,
-        },
       } satisfies Preset.Options,
     ],
   ],
@@ -73,26 +69,32 @@ const config: Config = {
   ],
 
   themeConfig: {
+    image: "img/icon.png",
+    metadata: [
+      {
+        property: "og:site_name",
+        content: "imagor docs",
+      },
+      {
+        name: "twitter:card",
+        content: "summary",
+      },
+    ],
     navbar: {
       title: "imagor",
       items: [
-        {
-          href: "https://imagor.net",
-          label: "imagor.net",
-          position: "left",
-        },
         {
           type: "dropdown",
           label: "Ecosystem",
           position: "left",
           items: [
             {
-              label: "imagor",
-              to: "/",
+              label: "Imagor Cloud",
+              href: "https://imagor.net",
             },
             {
-              label: "imagor Studio",
-              href: "https://imagor.net",
+              label: "imagor",
+              to: "/",
             },
             {
               label: "imagorvideo",
@@ -114,9 +116,10 @@ const config: Config = {
           position: "right",
         },
         {
-          href: "https://github.com/sponsors/cshum",
-          label: "Sponsor",
+          href: "https://imagor.net",
+          label: "Imagor Cloud",
           position: "right",
+          className: "navbar-buy-button",
         },
       ],
     },
@@ -124,15 +127,36 @@ const config: Config = {
       style: "dark",
       links: [
         {
-          title: "Ecosystem",
+          title: "Docs",
           items: [
             {
-              label: "imagor",
+              label: "Getting Started",
               to: "/",
             },
             {
-              label: "imagor Studio",
+              label: "Benchmarks",
+              to: "/benchmarks",
+            },
+            {
+              label: "Image Endpoint",
+              to: "/image-endpoint",
+            },
+            {
+              label: "Configuration",
+              to: "/configuration",
+            },
+          ],
+        },
+        {
+          title: "Ecosystem",
+          items: [
+            {
+              label: "Imagor Cloud",
               href: "https://imagor.net",
+            },
+            {
+              label: "imagor",
+              to: "/",
             },
             {
               label: "imagorvideo",
@@ -155,10 +179,14 @@ const config: Config = {
               label: "Docker Hub",
               href: "https://hub.docker.com/r/shumc/imagor",
             },
+            {
+              label: "Benchmarks",
+              to: "/benchmarks",
+            },
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} Adrian Shum.`,
+      copyright: `Copyright © ${new Date().getFullYear()} imagor.`,
     },
     prism: {
       theme: prismThemes.github,

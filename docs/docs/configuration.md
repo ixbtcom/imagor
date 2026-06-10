@@ -1,3 +1,13 @@
+---
+description: Complete imagor configuration reference covering command-line flags, environment variables, loaders, storage, security, processing, and deployment settings.
+keywords:
+  - imagor configuration
+  - imagor environment variables
+  - imagor flags
+  - imagor settings
+  - imagor config
+---
+
 # Configuration
 
 imagor supports command-line arguments and environment variables. Environment variables are the flag name in uppercase snake case — `-imagor-secret` becomes `IMAGOR_SECRET`:
@@ -110,6 +120,8 @@ HTTP_LOADER_DISABLE=1                  # Disable HTTP Loader entirely
 ```
 
 ## File System
+
+`FILE_SAFE_CHARS`, `S3_SAFE_CHARS`, and `GCLOUD_SAFE_CHARS` control which extra literal characters imagor preserves when normalizing storage keys. Use `[]` to preserve brackets, or `--` to disable escaping.
 
 ```dotenv
 FILE_SAFE_CHARS=           # Characters excluded from path escaping. Set -- for no-op
@@ -242,8 +254,10 @@ VIPS_DISABLE_FILTERS=blur,watermark  # Disable specific filters (csv)
 
 # Output
 VIPS_MOZJPEG=1               # Use MozJPEG for JPEG encoding (requires imagor-mozjpeg build)
-VIPS_AVIF_SPEED=5            # AVIF encode speed: 0 (smallest) to 9 (fastest). Default 5
+VIPS_AVIF_SPEED=8            # AVIF encode speed: 0 (smallest) to 9 (fastest). Default 8
+VIPS_STRIP_COLOR_PROFILE=1   # Strip embedded ICC color profiles while preserving other metadata
 VIPS_STRIP_METADATA=1        # Strip all metadata from output images
+VIPS_VECTOR=167772160        # libvips vector target disable bitmask; matches native VIPS_VECTOR semantics
 
 # Smart crop
 VIPS_DETECTOR_PROBE_SIZE=400  # Probe image size for smart crop detection (default 400)
@@ -267,6 +281,7 @@ VIPS_CACHE_FORMAT=pixel      # Cache format: pixel (default), png (lossless), we
 # Prometheus metrics
 PROMETHEUS_BIND=:5000        # Address to expose Prometheus metrics. Disabled if not set
 PROMETHEUS_PATH=/            # Metrics path (default /)
+PROMETHEUS_NAMESPACE=imagor  # Metrics namespace (default imagor)
 
 # Sentry error tracking
 SENTRY_DSN=                  # Sentry DSN. Enables Sentry integration when set

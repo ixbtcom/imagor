@@ -41,7 +41,7 @@
 
   /* Navbar */
   --ifm-navbar-background-color: rgba(255, 255, 255, 0.95);
-  --ifm-navbar-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --ifm-navbar-shadow: none;
 
   /* Footer */
   --ifm-footer-background-color: #fafafa;
@@ -63,6 +63,7 @@
 
   /* Background and foreground */
   --ifm-background-color: #0a0a0a;
+  --ifm-background-surface-color: #0a0a0a;
   --ifm-font-color-base: #fafafa;
 
   /* Muted colors - inverted */
@@ -85,23 +86,37 @@
   --ifm-toc-border-color: #404040;
 
   /* Navbar */
-  --ifm-navbar-background-color: rgba(10, 10, 10, 0.95);
-  --ifm-navbar-shadow: 0 1px 2px 0 rgba(255, 255, 255, 0.05);
+  --ifm-navbar-background-color: #0a0a0a;
+  --ifm-navbar-shadow: none;
 
   /* Footer */
-  --ifm-footer-background-color: #171717;
+  --ifm-footer-background-color: #0a0a0a;
   --ifm-footer-color: #a3a3a3;
   --ifm-footer-link-color: #d4d4d4;
   --ifm-footer-title-color: #fafafa;
+
+  /* Local search */
+  --search-local-highlight-color: #404040;
 }
 
 /* Additional styling for consistency */
 .navbar {
   border-bottom: 1px solid var(--ifm-toc-border-color);
+  box-shadow: none;
 }
 
 .footer {
   border-top: 1px solid var(--ifm-toc-border-color);
+}
+
+[data-theme="dark"] .footer--dark {
+  background-color: var(--ifm-navbar-background-color);
+}
+
+[data-theme="dark"] body,
+[data-theme="dark"] .main-wrapper,
+[data-theme="dark"] .container {
+  background-color: var(--ifm-navbar-background-color);
 }
 
 /* Button styling to match imagor.net */
@@ -129,6 +144,35 @@
 
 .button--secondary:hover {
   background-color: var(--ifm-color-emphasis-100);
+}
+
+/* Imagor Cloud navbar button */
+.navbar-buy-button {
+  background-color: var(--ifm-color-primary) !important;
+  color: white !important;
+  border-radius: 0.5rem !important;
+  padding: 0.5rem 1rem !important;
+  font-weight: 500 !important;
+  text-decoration: none !important;
+  transition: all 0.2s ease !important;
+  margin-left: 0.5rem !important;
+  margin-right: 0.75rem !important;
+}
+
+.navbar-buy-button:hover {
+  background-color: var(--ifm-color-primary-light) !important;
+  color: white !important;
+  text-decoration: none !important;
+}
+
+[data-theme="dark"] .navbar-buy-button {
+  background-color: var(--ifm-color-primary) !important;
+  color: #0a0a0a !important;
+}
+
+[data-theme="dark"] .navbar-buy-button:hover {
+  background-color: var(--ifm-color-primary-light) !important;
+  color: #0a0a0a !important;
 }
 
 /* Screenshot image containers */
@@ -251,4 +295,21 @@ a:hover {
   color: var(--ifm-footer-link-color) !important;
   opacity: 0.8;
   text-decoration: underline;
+}
+
+.benchmark-chart-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: 1fr;
+  margin: 1.5rem 0;
+}
+
+.benchmark-chart-card {
+  min-width: 0;
+}
+
+@media (min-width: 996px) {
+  .benchmark-chart-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }

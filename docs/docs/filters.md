@@ -1,3 +1,13 @@
+---
+description: Full imagor filter reference for format conversion, quality, watermarking, text overlays, color operations, metadata, and output control.
+keywords:
+  - imagor filters
+  - imagor watermark
+  - imagor format conversion
+  - imagor text overlay
+  - imagor image filters
+---
+
 # Filters
 
 Filters `/filters:NAME(ARGS):NAME(ARGS):.../` is a pipeline of image operations that will be sequentially applied to the image. Examples:
@@ -206,6 +216,14 @@ Composites a processed image onto the current image with full imagor transformat
 
 ---
 
+### `lossless()`
+
+Enables lossless pixel-exact encoding for formats that support it: `webp`, `jxl`, `avif`, `heif`, `jp2`. No-op for `jpeg` (lossy only) and `png` (already lossless). When set, the `max_bytes` quality-degrade retry is skipped, since lossless output cannot be reduced by lowering quality.
+
+For `webp`, libvips [reinterprets](https://github.com/libvips/libvips/issues/3881) the [`quality`](#qualityamount) filter as a compression-effort knob in lossless mode with higher values producing smaller files but encode slower. `quality(100)` gives the smallest output.
+
+---
+
 ### `max_bytes(amount)`
 
 Automatically degrades the quality of the image until the image is under the specified `amount` of bytes.
@@ -375,7 +393,7 @@ Removes Exif metadata from the resulting image.
 
 ### `strip_icc()`
 
-Removes ICC profile information from the resulting image. The image is first converted to sRGB color space to preserve correct colors before the profile is removed.
+Removes the embedded ICC color profile from the resulting image. The image is first converted to sRGB color space to preserve correct colors before the profile is removed.
 
 ---
 
