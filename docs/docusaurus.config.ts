@@ -49,6 +49,14 @@ const config: Config = {
           routeBasePath: "/",
         },
         blog: false,
+        sitemap: {
+          ignorePatterns: ["/search", "/404.html"],
+          createSitemapItems: async ({ defaultCreateSitemapItems, ...rest }) => {
+            const items = await defaultCreateSitemapItems(rest);
+
+            return items.filter((item) => !item.url.includes("/category/"));
+          },
+        },
         theme: {
           customCss: "./src/css/custom.css",
         },
@@ -89,7 +97,7 @@ const config: Config = {
           position: "left",
           items: [
             {
-              label: "Imagor Cloud",
+              label: "Imagor Studio",
               href: "https://imagor.net",
             },
             {
@@ -117,7 +125,7 @@ const config: Config = {
         },
         {
           href: "https://imagor.net",
-          label: "Imagor Cloud",
+          label: "Imagor Studio",
           position: "right",
           className: "navbar-buy-button",
         },
@@ -151,7 +159,7 @@ const config: Config = {
           title: "Ecosystem",
           items: [
             {
-              label: "Imagor Cloud",
+              label: "Imagor Studio",
               href: "https://imagor.net",
             },
             {
