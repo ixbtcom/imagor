@@ -186,7 +186,13 @@ func (s *S3Storage) Put(ctx context.Context, image string, blob *imagor.Blob) er
 	if !ok {
 		return imagor.ErrInvalid
 	}
-	reader, size, err := blob.NewReader()
+	// Seekable body: the AWS SDK must be able to seek the body - to compute the
+	// signed payload hash over plain HTTP, and to rewind on a retryable error over
+	// HTTPS (e.g. a connection reset from the SeaweedFS S3 gateway behind HAProxy).
+	// NewReader() yields the raw non-seekable stream for loader-sourced originals,
+	// so those fail with "request stream is not seekable". NewReadSeeker() buffers
+	// into a seekable reader (seekstream) so both paths succeed and the object saves.
+	reader, size, err := blob.NewReadSeeker()
 	if err != nil {
 		return err
 	}

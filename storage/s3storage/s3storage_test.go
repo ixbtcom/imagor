@@ -1,10 +1,12 @@
 package s3storage
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -291,6 +293,47 @@ func TestPut_WithTagging(t *testing.T) {
 
 	require.NoError(t, s.Put(ctx, "/foo/bar.png", imagor.NewBlobFromBytes([]byte("bar"))))
 	assert.Equal(t, "lifecycle=generated&source=imagor", receivedTagging)
+}
+
+func TestPut_RetryableError_SucceedsViaSeekableBody(t *testing.T) {
+	var puts int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			_, _ = io.Copy(io.Discard, r.Body)
+			_ = r.Body.Close()
+			// First PUT attempt returns a retryable 500 so the AWS SDK retries.
+			// A non-seekable Body cannot be rewound for the retry; a seekable one can.
+			if atomic.AddInt32(&puts, 1) == 1 {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("ETag", `"etag"`)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	s := New(
+		aws.Config{
+			Region:      "eu-central-1",
+			Credentials: credentials.NewStaticCredentialsProvider("KEY", "SECRET", ""),
+		},
+		"test",
+		WithEndpoint(ts.URL),
+		WithForcePathStyle(true),
+	)
+
+	// A loader-sourced original is a non-seekable stream; emulate it (io.NopCloser
+	// over a bytes.Reader is an io.ReadCloser but NOT an io.Seeker).
+	data := []byte("ORIGINAL-BYTES-0123456789-abcdefghij")
+	blob := imagor.NewBlob(func() (io.ReadCloser, int64, error) {
+		return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
+	})
+
+	require.NoError(t, s.Put(context.Background(), "/orig/pic.jpg", blob))
+	assert.GreaterOrEqual(t, atomic.LoadInt32(&puts), int32(2), "expected the SDK to retry")
 }
 
 func TestWithEndpoint(t *testing.T) {
