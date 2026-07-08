@@ -112,6 +112,7 @@ type Imagor struct {
 	Debug                  bool
 
 	g          singleflight.Group
+	saveGroup  singleflight.Group
 	sema       *semaphore.Weighted
 	queueSema  *semaphore.Weighted
 	baseParams imagorpath.Params
@@ -455,7 +456,15 @@ func (app *Imagor) Do(r *http.Request, p imagorpath.Params) (blob *Blob, err err
 				storageKey = app.StoragePathStyle.Hash(p.Image)
 			}
 			go func(blob *Blob) {
-				app.saveWithErrorHandling(ctx, app.Storages, storageKey, blob)
+				// Single-flight the original save by storageKey. N concurrent variants of
+				// one NEW original have distinct result keys, so the outer suppress does not
+				// coalesce them; without this each saves the same original in parallel,
+				// multiplying the S3 flap surface and racing the delete-after-save-error
+				// path (a failed sibling deletes a succeeded sibling's object).
+				_, _, _ = app.saveGroup.Do(storageKey, func() (interface{}, error) {
+					app.saveWithErrorHandling(ctx, app.Storages, storageKey, blob)
+					return nil, nil
+				})
 				close(doneSave)
 			}(blob)
 		}
