@@ -129,17 +129,35 @@ func TestProcessor(t *testing.T) {
 		require.NoError(t, err)
 		require.Greater(t, len(full), 3000)
 
-		blob := imagor.NewBlob(func() (io.ReadCloser, int64, error) {
-			return &nonSeekableReadCloser{Reader: bytes.NewReader(full[:3000])}, int64(len(full)), nil
+		newTruncatedBlob := func() *imagor.Blob {
+			return imagor.NewBlob(func() (io.ReadCloser, int64, error) {
+				return &nonSeekableReadCloser{Reader: bytes.NewReader(full[:3000])}, int64(len(full)), nil
+			})
+		}
+
+		t.Run("thumbnail path", func(t *testing.T) {
+			params := imagorpath.Parse("/unsafe/fit-in/100x0/filters:format(avif)/gopher-front.png")
+			result, err := v.Process(context.Background(), newTruncatedBlob(), params, nil)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "read error")
+			assert.True(t, result == nil || result.IsEmpty(),
+				"a partial decode must not produce a cacheable image")
 		})
-		params := imagorpath.Parse("/unsafe/fit-in/100x0/filters:format(avif)/gopher-front.png")
 
-		result, err := v.Process(context.Background(), blob, params, nil)
+		t.Run("full image path", func(t *testing.T) {
+			ctx := withContext(context.Background())
+			defer contextDone(ctx)
 
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "read error")
-		assert.True(t, result == nil || result.IsEmpty(),
-			"a partial decode must not produce a cacheable image")
+			img, err := v.NewImage(ctx, newTruncatedBlob(), 1, 1, 0)
+			if err == nil {
+				defer img.Close()
+				_, err = img.WriteToMemory()
+			}
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "read error")
+		})
 	})
 	t.Run("vips lossless filter", func(t *testing.T) {
 		var resultDir = filepath.Join(testDataDir, "golden")

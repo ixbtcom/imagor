@@ -14,4 +14,4 @@ Base: upstream `v1.9.2`.
   image loads. A prematurely closed HTTP body is rejected instead of being
   encoded and cached as a structurally valid but visually corrupted AVIF/WebP.
 
-Both are candidates for an upstream PR (kept out of the PR branch; fork-only doc).
+All three are candidates for an upstream PR (kept out of the PR branch; fork-only doc).
