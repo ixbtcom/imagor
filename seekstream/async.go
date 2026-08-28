@@ -237,3 +237,18 @@ func (s *AsyncReadSeeker) Size() int64 {
 	}
 	return s.bytesRead
 }
+
+// Err reports a source read failure even when a consumer replaced or cleared
+// its own error message. A clean EOF before the declared size is also a
+// truncated source.
+func (s *AsyncReadSeeker) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.readErr != nil {
+		return s.readErr
+	}
+	if s.finished && s.expected > 0 && s.bytesRead < s.expected {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}

@@ -67,6 +67,17 @@ func TestWrapErrUsesDedicatedStatusForStrictSourceDecode(t *testing.T) {
 	}
 }
 
+func TestWrapErrUsesTrackedSourceFailureWhenVipsBufferIsEmpty(t *testing.T) {
+	wrapped := WrapErr(newSourceDependencyError(
+		errors.New("vips: empty error buffer"),
+		context.DeadlineExceeded,
+	))
+	imagorErr, ok := wrapped.(imagor.Error)
+	require.True(t, ok)
+	assert.Equal(t, http.StatusFailedDependency, imagorErr.Code)
+	assert.Contains(t, imagorErr.Message, "vips: empty error buffer")
+}
+
 func (r *nonSeekableReadCloser) Close() error { return nil }
 
 func TestMain(m *testing.M) {
@@ -935,6 +946,28 @@ func TestProcessor(t *testing.T) {
 
 		_, ok := reader.(io.ReadSeeker)
 		assert.True(t, ok, "default source reader should be seekable")
+	})
+	t.Run("source reader preserves truncation after consumer loses error message", func(t *testing.T) {
+		payload := []byte("truncated")
+		blob := imagor.NewBlob(func() (io.ReadCloser, int64, error) {
+			return &nonSeekableReadCloser{Reader: bytes.NewReader(payload)}, int64(len(payload) + 10), nil
+		})
+
+		p := NewProcessor()
+		reader, err := p.newSourceReaderFromBlob(blob)
+		require.NoError(t, err)
+		defer func() { _ = reader.Close() }()
+		_, err = io.ReadAll(reader)
+		require.NoError(t, err)
+
+		tracker, ok := reader.(*sourceReadTracker)
+		require.True(t, ok)
+		assert.ErrorIs(t, tracker.Err(), io.ErrUnexpectedEOF)
+		wrapped := WrapErr(newSourceDependencyError(
+			errors.New("vips: empty error buffer"),
+			tracker.Err(),
+		))
+		assert.Equal(t, http.StatusFailedDependency, wrapped.(imagor.Error).Code)
 	})
 	t.Run("raw routed to dcrawload when available", func(t *testing.T) {
 		// BlobTypeRAF (Fuji RAF) with hasDcrawload=true must be routed to dcrawload,

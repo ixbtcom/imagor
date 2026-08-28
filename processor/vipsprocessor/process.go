@@ -51,9 +51,14 @@ type exportParams struct {
 // Process implements imagor.Processor interface
 func (v *Processor) Process(
 	ctx context.Context, blob *imagor.Blob, p imagorpath.Params, load imagor.LoadFunc,
-) (*imagor.Blob, error) {
+) (result *imagor.Blob, retErr error) {
 	ctx = withContext(ctx)
 	defer contextDone(ctx)
+	defer func() {
+		if retErr != nil {
+			retErr = WrapErr(newSourceDependencyError(retErr, contextSourceError(ctx)))
+		}
+	}()
 
 	// Use image cache for preview() requests: known-size, within cache max dims, no bypass conditions.
 	// preview() opts in to base image caching for interactive editing workflows.

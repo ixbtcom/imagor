@@ -17,5 +17,9 @@ Base: upstream `v1.9.2`.
   keeping deterministic libvips processing errors on HTTP 406. This lets the
   ingress retry only a failed source dependency without flooding the slow pool
   with invalid transforms.
+- fix(vipsprocessor): preserve the underlying source-reader failure separately
+  from libvips' error buffer. Some truncated streams otherwise surface only as
+  `vips: empty error buffer`; they now keep the same retryable HTTP 424 contract,
+  while an empty buffer without a source failure remains HTTP 406.
 
 All three are candidates for an upstream PR (kept out of the PR branch; fork-only doc).

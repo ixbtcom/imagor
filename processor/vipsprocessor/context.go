@@ -8,7 +8,12 @@ import (
 type contextResourceKey struct{}
 
 type contextResource struct {
-	cbs []func()
+	cbs           []func()
+	sourceReaders []sourceErrorReporter
+}
+
+type sourceErrorReporter interface {
+	Err() error
 }
 
 func (r *contextResource) Defer(cb func()) {
@@ -34,6 +39,26 @@ func contextDone(ctx context.Context) {
 	if r, ok := ctx.Value(contextResourceKey{}).(*contextResource); ok {
 		r.Done()
 	}
+}
+
+func contextTrackSource(ctx context.Context, source sourceErrorReporter) {
+	if source == nil {
+		return
+	}
+	if r, ok := ctx.Value(contextResourceKey{}).(*contextResource); ok {
+		r.sourceReaders = append(r.sourceReaders, source)
+	}
+}
+
+func contextSourceError(ctx context.Context) error {
+	if r, ok := ctx.Value(contextResourceKey{}).(*contextResource); ok {
+		for _, source := range r.sourceReaders {
+			if err := source.Err(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Local rotation context (resets for each processing level)

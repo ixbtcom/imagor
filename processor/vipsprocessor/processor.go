@@ -2,6 +2,7 @@ package vipsprocessor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -16,6 +17,58 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 )
+
+type sourceReadTracker struct {
+	io.ReadSeekCloser
+	mu      sync.Mutex
+	readErr error
+}
+
+func (r *sourceReadTracker) Read(p []byte) (int, error) {
+	n, err := r.ReadSeekCloser.Read(p)
+	if err != nil && err != io.EOF && err != io.ErrClosedPipe {
+		r.mu.Lock()
+		if r.readErr == nil {
+			r.readErr = err
+		}
+		r.mu.Unlock()
+	}
+	return n, err
+}
+
+func (r *sourceReadTracker) Err() error {
+	r.mu.Lock()
+	err := r.readErr
+	r.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if reporter, ok := r.ReadSeekCloser.(sourceErrorReporter); ok {
+		return reporter.Err()
+	}
+	return nil
+}
+
+type sourceDependencyError struct {
+	processErr error
+	readErr    error
+}
+
+func (e *sourceDependencyError) Error() string {
+	if e.processErr != nil {
+		return e.processErr.Error()
+	}
+	return e.readErr.Error()
+}
+
+func (e *sourceDependencyError) Unwrap() error { return e.processErr }
+
+func newSourceDependencyError(processErr, readErr error) error {
+	if processErr == nil || readErr == nil {
+		return processErr
+	}
+	return &sourceDependencyError{processErr: processErr, readErr: readErr}
+}
 
 // FilterFunc filter handler function
 type FilterFunc func(ctx context.Context, img *vips.Image, load imagor.LoadFunc, args ...string) (err error)
@@ -211,13 +264,19 @@ func (v *Processor) Shutdown(ctx context.Context) error {
 
 func (v *Processor) newSourceReaderFromBlob(blob *imagor.Blob) (io.ReadCloser, error) {
 	reader, _, err := blob.NewReadSeeker()
-	return reader, err
+	if err != nil {
+		return nil, err
+	}
+	return &sourceReadTracker{ReadSeekCloser: reader}, nil
 }
 
 func (v *Processor) newSourceFromBlob(ctx context.Context, blob *imagor.Blob) (*vips.Source, error) {
 	reader, err := v.newSourceReaderFromBlob(blob)
 	if err != nil {
 		return nil, err
+	}
+	if tracker, ok := reader.(*sourceReadTracker); ok {
+		contextTrackSource(ctx, tracker)
 	}
 	src := vips.NewSource(reader)
 	contextDefer(ctx, src.Close)
@@ -549,6 +608,10 @@ func recalculateImage(img *vips.Image, n, page int) (int, int) {
 func WrapErr(err error) error {
 	if err == nil {
 		return nil
+	}
+	var sourceErr *sourceDependencyError
+	if errors.As(err, &sourceErr) {
+		return imagor.NewError(sourceErr.Error(), http.StatusFailedDependency)
 	}
 	if e, ok := err.(imagor.Error); ok {
 		return e

@@ -241,6 +241,7 @@ func TestAsyncReadSeeker_PropagatesReadErrorAfterBufferedBytes(t *testing.T) {
 	assert.ErrorIs(t, err, boom)
 	assert.Equal(t, 0, rs.Len())
 	assert.Equal(t, int64(6), rs.Size())
+	assert.ErrorIs(t, rs.Err(), boom)
 }
 
 func TestAsyncReadSeeker_ShortSourceClampsLenAndSizeAfterEOF(t *testing.T) {
@@ -254,6 +255,7 @@ func TestAsyncReadSeeker_ShortSourceClampsLenAndSizeAfterEOF(t *testing.T) {
 	assert.Equal(t, "012345", string(buf))
 	assert.Equal(t, 0, rs.Len())
 	assert.Equal(t, int64(6), rs.Size())
+	assert.ErrorIs(t, rs.Err(), io.ErrUnexpectedEOF)
 
 	pos, err := rs.Seek(0, io.SeekEnd)
 	require.NoError(t, err)
