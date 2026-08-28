@@ -48,6 +48,10 @@ type exportParams struct {
 	maxBytes          int
 }
 
+type processFunc func(
+	ctx context.Context, blob *imagor.Blob, p imagorpath.Params, load imagor.LoadFunc,
+) (*imagor.Blob, error)
+
 // Process implements imagor.Processor interface
 func (v *Processor) Process(
 	ctx context.Context, blob *imagor.Blob, p imagorpath.Params, load imagor.LoadFunc,
@@ -59,6 +63,16 @@ func (v *Processor) Process(
 			retErr = WrapErr(newSourceDependencyError(retErr, contextSourceError(ctx)))
 		}
 	}()
+	run := v.process
+	if v.processFunc != nil {
+		run = v.processFunc
+	}
+	return run(ctx, blob, p, load)
+}
+
+func (v *Processor) process(
+	ctx context.Context, blob *imagor.Blob, p imagorpath.Params, load imagor.LoadFunc,
+) (*imagor.Blob, error) {
 
 	// Use image cache for preview() requests: known-size, within cache max dims, no bypass conditions.
 	// preview() opts in to base image caching for interactive editing workflows.

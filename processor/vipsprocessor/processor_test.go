@@ -212,6 +212,39 @@ func TestProcessor(t *testing.T) {
 			assert.Contains(t, w.Body.String(), "read error")
 		})
 	})
+	t.Run("process preserves tracked source failure when vips buffer is empty", func(t *testing.T) {
+		payload := []byte("truncated")
+		blob := imagor.NewBlob(func() (io.ReadCloser, int64, error) {
+			return &nonSeekableReadCloser{Reader: bytes.NewReader(payload)}, int64(len(payload) + 10), nil
+		})
+
+		previous := v.processFunc
+		v.processFunc = func(
+			ctx context.Context, blob *imagor.Blob, _ imagorpath.Params, _ imagor.LoadFunc,
+		) (*imagor.Blob, error) {
+			_, err := v.newSourceFromBlob(ctx, blob)
+			require.NoError(t, err)
+
+			resource, ok := ctx.Value(contextResourceKey{}).(*contextResource)
+			require.True(t, ok)
+			require.Len(t, resource.sourceReaders, 1)
+			tracker, ok := resource.sourceReaders[0].(*sourceReadTracker)
+			require.True(t, ok)
+			_, err = io.ReadAll(tracker)
+			require.NoError(t, err)
+			require.ErrorIs(t, tracker.Err(), io.ErrUnexpectedEOF)
+
+			return nil, errors.New("vips: empty error buffer")
+		}
+		defer func() { v.processFunc = previous }()
+
+		_, err := v.Process(context.Background(), blob, imagorpath.Params{}, nil)
+		require.Error(t, err)
+		imagorErr, ok := err.(imagor.Error)
+		require.True(t, ok)
+		assert.Equal(t, http.StatusFailedDependency, imagorErr.Code)
+		assert.Contains(t, imagorErr.Message, "vips: empty error buffer")
+	})
 	t.Run("vips lossless filter", func(t *testing.T) {
 		var resultDir = filepath.Join(testDataDir, "golden")
 		doGoldenTests(t, resultDir, []test{

@@ -116,6 +116,7 @@ type Processor struct {
 	cache          *imageCache
 	cacheSF        singleflight.Group
 	hasDcrawload   bool
+	processFunc    processFunc
 }
 
 // NewProcessor create Processor

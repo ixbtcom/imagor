@@ -22,4 +22,4 @@ Base: upstream `v1.9.2`.
   `vips: empty error buffer`; they now keep the same retryable HTTP 424 contract,
   while an empty buffer without a source failure remains HTTP 406.
 
-All three are candidates for an upstream PR (kept out of the PR branch; fork-only doc).
+All listed changes are candidates for an upstream PR (kept out of the PR branch; fork-only doc).
