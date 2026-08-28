@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -42,6 +43,28 @@ type test struct {
 
 type nonSeekableReadCloser struct {
 	io.Reader
+}
+
+func TestWrapErrUsesDedicatedStatusForStrictSourceDecode(t *testing.T) {
+	testCases := []struct {
+		name       string
+		message    string
+		expectCode int
+	}{
+		{"stream read error", "source_custom: premature end of data: read error", http.StatusFailedDependency},
+		{"truncated jpeg", "VipsJpeg: premature end of JPEG image", http.StatusFailedDependency},
+		{"invalid crop stays generic", "extract_area: bad extract area", http.StatusNotAcceptable},
+		{"empty vips error stays generic", "vips: empty error buffer", http.StatusNotAcceptable},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapped := WrapErr(errors.New(tc.message))
+			imagorErr, ok := wrapped.(imagor.Error)
+			require.True(t, ok)
+			assert.Equal(t, tc.expectCode, imagorErr.Code)
+		})
+	}
 }
 
 func (r *nonSeekableReadCloser) Close() error { return nil }
@@ -157,6 +180,25 @@ func TestProcessor(t *testing.T) {
 
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "read error")
+		})
+
+		t.Run("HTTP response uses retryable dependency status", func(t *testing.T) {
+			app := imagor.New(imagor.WithOptions(
+				imagor.WithUnsafe(true),
+				imagor.WithLoaders(loaderFunc(func(_ *http.Request, _ string) (*imagor.Blob, error) {
+					return newTruncatedBlob(), nil
+				})),
+				imagor.WithProcessors(v),
+			))
+			w := httptest.NewRecorder()
+			app.ServeHTTP(w, httptest.NewRequest(
+				http.MethodGet,
+				"https://example.com/unsafe/fit-in/100x0/filters:format(avif)/gopher-front.png",
+				nil,
+			))
+
+			assert.Equal(t, http.StatusFailedDependency, w.Code)
+			assert.Contains(t, w.Body.String(), "read error")
 		})
 	})
 	t.Run("vips lossless filter", func(t *testing.T) {

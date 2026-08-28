@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"runtime"
 	"strings"
 	"sync"
@@ -556,6 +557,14 @@ func WrapErr(err error) error {
 	if strings.HasPrefix(msg, "VipsForeignLoad:") &&
 		strings.HasSuffix(msg, "is not in a known format") {
 		return imagor.ErrUnsupportedFormat
+	}
+	// FailOnError turns a truncated source stream into one of these loader
+	// diagnostics. Give this retryable dependency failure a dedicated status;
+	// generic libvips processing errors remain 406 and must not flood a slow pool.
+	lowerMsg := strings.ToLower(msg)
+	if strings.Contains(lowerMsg, "read error") ||
+		strings.Contains(lowerMsg, "premature end of jpeg image") {
+		return imagor.NewError(msg, http.StatusFailedDependency)
 	}
 	return imagor.NewError(msg, 406)
 }

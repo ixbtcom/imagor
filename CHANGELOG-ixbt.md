@@ -13,5 +13,9 @@ Base: upstream `v1.9.2`.
 - fix(vipsprocessor): enable strict source decoding for both thumbnail and full
   image loads. A prematurely closed HTTP body is rejected instead of being
   encoded and cached as a structurally valid but visually corrupted AVIF/WebP.
+- fix(vipsprocessor): return HTTP 424 for strict source-decode failures while
+  keeping deterministic libvips processing errors on HTTP 406. This lets the
+  ingress retry only a failed source dependency without flooding the slow pool
+  with invalid transforms.
 
 All three are candidates for an upstream PR (kept out of the PR branch; fork-only doc).
