@@ -335,7 +335,9 @@ func (v *Processor) NewThumbnail(
 	ctx context.Context, blob *imagor.Blob, width, height int, crop vips.Interesting,
 	size vips.Size, n, page int, dpi int,
 ) (*vips.Image, error) {
-	var options = &vips.LoadOptions{}
+	// A permissive decode can turn a prematurely closed HTTP body into a valid
+	// output container with duplicated or missing scanlines. Reject source errors.
+	var options = &vips.LoadOptions{FailOnError: true}
 	if dpi > 0 {
 		options.Dpi = dpi
 	}
@@ -412,7 +414,8 @@ func (v *Processor) newThumbnailFallback(
 
 // NewImage creates new Image from imagor.Blob
 func (v *Processor) NewImage(ctx context.Context, blob *imagor.Blob, n, page int, dpi int) (*vips.Image, error) {
-	var options = &vips.LoadOptions{}
+	// Match the thumbnail path: corrupt or truncated sources must not be encoded.
+	var options = &vips.LoadOptions{FailOnError: true}
 	if dpi > 0 {
 		options.Dpi = dpi
 	}

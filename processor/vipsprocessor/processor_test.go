@@ -124,6 +124,23 @@ func TestProcessor(t *testing.T) {
 			{name: "export heif", path: "filters:format(heif):quality(70)/gopher-front.png", checkTypeOnly: true},
 		}, WithDebug(true), WithLogger(zap.NewExample()))
 	})
+	t.Run("truncated PNG source is rejected", func(t *testing.T) {
+		full, err := os.ReadFile(filepath.Join(testDataDir, "gopher-front.png"))
+		require.NoError(t, err)
+		require.Greater(t, len(full), 3000)
+
+		blob := imagor.NewBlob(func() (io.ReadCloser, int64, error) {
+			return &nonSeekableReadCloser{Reader: bytes.NewReader(full[:3000])}, int64(len(full)), nil
+		})
+		params := imagorpath.Parse("/unsafe/fit-in/100x0/filters:format(avif)/gopher-front.png")
+
+		result, err := v.Process(context.Background(), blob, params, nil)
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "read error")
+		assert.True(t, result == nil || result.IsEmpty(),
+			"a partial decode must not produce a cacheable image")
+	})
 	t.Run("vips lossless filter", func(t *testing.T) {
 		var resultDir = filepath.Join(testDataDir, "golden")
 		doGoldenTests(t, resultDir, []test{
