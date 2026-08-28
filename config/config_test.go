@@ -26,6 +26,7 @@ func TestDefault(t *testing.T) {
 	assert.False(t, app.Debug)
 	assert.False(t, app.Unsafe)
 	assert.Equal(t, time.Second*30, app.RequestTimeout)
+	assert.Equal(t, http.StatusRequestTimeout, app.TimeoutStatusCode)
 	assert.Equal(t, time.Second*20, app.LoadTimeout)
 	assert.Equal(t, time.Second*20, app.SaveTimeout)
 	assert.Equal(t, time.Second*20, app.ProcessTimeout)
@@ -59,6 +60,7 @@ func TestBasic(t *testing.T) {
 		"-imagor-disable-error-body",
 		"-imagor-disable-params-endpoint",
 		"-imagor-request-timeout", "16s",
+		"-imagor-timeout-status-code", "424",
 		"-imagor-load-timeout", "7s",
 		"-imagor-process-timeout", "19s",
 		"-imagor-process-concurrency", "199",
@@ -84,6 +86,7 @@ func TestBasic(t *testing.T) {
 	assert.True(t, app.DisableParamsEndpoint)
 	assert.Equal(t, "RrTsWGEXFU2s1J1mTl1j_ciO-1E=", app.Signer.Sign("bar"))
 	assert.Equal(t, time.Second*16, app.RequestTimeout)
+	assert.Equal(t, http.StatusFailedDependency, app.TimeoutStatusCode)
 	assert.Equal(t, time.Second*7, app.LoadTimeout)
 	assert.Equal(t, time.Second*19, app.ProcessTimeout)
 	assert.Equal(t, int64(199), app.ProcessConcurrency)

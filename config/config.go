@@ -46,6 +46,8 @@ func NewImagor(
 			"Output JPEG format automatically if JPEG or no specific format is requested")
 		imagorRequestTimeout = fs.Duration("imagor-request-timeout",
 			time.Second*30, "Timeout for performing imagor request")
+		imagorTimeoutStatusCode = fs.Int("imagor-timeout-status-code",
+			408, "HTTP status returned when the overall imagor request times out")
 		imagorLoadTimeout = fs.Duration("imagor-load-timeout",
 			0, "Timeout for imagor Loader request, should be smaller than imagor-request-timeout")
 		imagorSaveTimeout = fs.Duration("imagor-save-timeout",
@@ -109,6 +111,7 @@ func NewImagor(
 		imagor.WithBasePathRedirect(*imagorBasePathRedirect),
 		imagor.WithBaseParams(*imagorBaseParams),
 		imagor.WithRequestTimeout(*imagorRequestTimeout),
+		imagor.WithTimeoutStatusCode(*imagorTimeoutStatusCode),
 		imagor.WithLoadTimeout(*imagorLoadTimeout),
 		imagor.WithSaveTimeout(*imagorSaveTimeout),
 		imagor.WithProcessTimeout(*imagorProcessTimeout),

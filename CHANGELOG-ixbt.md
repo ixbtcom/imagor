@@ -21,5 +21,9 @@ Base: upstream `v1.9.2`.
   from libvips' error buffer. Some truncated streams otherwise surface only as
   `vips: empty error buffer`; they now keep the same retryable HTTP 424 contract,
   while an empty buffer without a source failure remains HTTP 406.
+- feat(imagor): add `IMAGOR_TIMEOUT_STATUS_CODE` with backward-compatible
+  default HTTP 408. A fast role behind nginx can return retryable HTTP 424 for
+  its own deadline, because nginx does not intercept an upstream HTTP 408;
+  final fallback roles can keep 408 visible to clients and monitoring.
 
 All listed changes are candidates for an upstream PR (kept out of the PR branch; fork-only doc).

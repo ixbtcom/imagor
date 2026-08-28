@@ -78,6 +78,7 @@ IMAGOR_CACHE_HEADER_SWR=24h              # HTTP Cache-Control stale-while-revali
 IMAGOR_CACHE_HEADER_NO_CACHE=1           # Set Cache-Control: no-cache on responses
 
 IMAGOR_REQUEST_TIMEOUT=30s    # Overall request timeout (default 30s)
+IMAGOR_TIMEOUT_STATUS_CODE=408 # HTTP status for an overall request timeout (default 408)
 IMAGOR_LOAD_TIMEOUT=          # Loader fetch timeout (should be < request timeout)
 IMAGOR_SAVE_TIMEOUT=          # Storage save timeout
 IMAGOR_PROCESS_TIMEOUT=       # Image processing timeout

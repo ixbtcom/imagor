@@ -92,6 +92,7 @@ type Imagor struct {
 	ResultStorages         []Storage
 	Processors             []Processor
 	RequestTimeout         time.Duration
+	TimeoutStatusCode      int
 	LoadTimeout            time.Duration
 	SaveTimeout            time.Duration
 	ProcessTimeout         time.Duration
@@ -121,13 +122,14 @@ type Imagor struct {
 // New create new Imagor
 func New(options ...Option) *Imagor {
 	app := &Imagor{
-		Logger:         zap.NewNop(),
-		RequestTimeout: time.Second * 30,
-		LoadTimeout:    time.Second * 20,
-		SaveTimeout:    time.Second * 20,
-		ProcessTimeout: time.Second * 20,
-		CacheHeaderTTL: time.Hour * 24 * 7,
-		CacheHeaderSWR: time.Hour * 24,
+		Logger:            zap.NewNop(),
+		RequestTimeout:    time.Second * 30,
+		TimeoutStatusCode: http.StatusRequestTimeout,
+		LoadTimeout:       time.Second * 20,
+		SaveTimeout:       time.Second * 20,
+		ProcessTimeout:    time.Second * 20,
+		CacheHeaderTTL:    time.Hour * 24 * 7,
+		CacheHeaderSWR:    time.Hour * 24,
 	}
 	for _, option := range options {
 		option(app)
@@ -219,7 +221,7 @@ func (app *Imagor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Check if we should respond with raw image on error
 		if app.ResponseRawOnError && !isBlobEmpty(blob) {
-			e := WrapError(err)
+			e := app.wrapError(err)
 			app.Logger.Warn("response-raw-on-error",
 				zap.Any("params", p),
 				zap.Error(err),
@@ -561,7 +563,7 @@ func (app *Imagor) handlePostRequest(w http.ResponseWriter, r *http.Request) {
 	blob, err := checkBlob(app.Do(r, p))
 	if err != nil {
 		if app.ResponseRawOnError && !isBlobEmpty(blob) {
-			e := WrapError(err)
+			e := app.wrapError(err)
 			app.Logger.Warn("response-raw-on-error",
 				zap.Any("params", p),
 				zap.Error(err),
@@ -915,13 +917,23 @@ func (app *Imagor) handleErrorResponse(w http.ResponseWriter, r *http.Request, e
 		w.WriteHeader(499)
 		return
 	}
-	e := WrapError(err)
+	e := app.wrapError(err)
 	if app.DisableErrorBody {
 		w.WriteHeader(e.Code)
 		return
 	}
 	w.WriteHeader(e.Code)
 	writeJSON(w, r, e)
+}
+
+func (app *Imagor) wrapError(err error) Error {
+	e := WrapError(err)
+	if e.Code == http.StatusRequestTimeout {
+		if app.TimeoutStatusCode != 0 {
+			e.Code = app.TimeoutStatusCode
+		}
+	}
+	return e
 }
 
 func (app *Imagor) debugLog() {

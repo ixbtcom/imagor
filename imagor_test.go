@@ -52,6 +52,17 @@ func TestWithUnsafe(t *testing.T) {
 	assert.Equal(t, w.Body.String(), jsonStr(ErrSignatureMismatch))
 }
 
+func TestWithTimeoutStatusCode(t *testing.T) {
+	app := New(WithTimeoutStatusCode(http.StatusFailedDependency))
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "https://example.com/unsafe/example.jpg", nil)
+
+	app.handleErrorResponse(w, r, context.DeadlineExceeded)
+
+	assert.Equal(t, http.StatusFailedDependency, w.Code)
+	assert.JSONEq(t, `{"message":"timeout","status":424}`, w.Body.String())
+}
+
 func TestWithEnablePostRequests(t *testing.T) {
 	logger := zap.NewExample()
 

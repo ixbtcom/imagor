@@ -68,6 +68,16 @@ func WithRequestTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithTimeoutStatusCode sets the HTTP status returned when the overall request
+// deadline expires. The default remains 408 for backward compatibility.
+func WithTimeoutStatusCode(code int) Option {
+	return func(app *Imagor) {
+		if code >= 400 && code <= 599 {
+			app.TimeoutStatusCode = code
+		}
+	}
+}
+
 // WithCacheHeaderTTL with browser cache header ttl option
 func WithCacheHeaderTTL(ttl time.Duration) Option {
 	return func(app *Imagor) {
