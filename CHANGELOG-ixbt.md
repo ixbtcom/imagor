@@ -26,4 +26,16 @@ Base: upstream `v1.9.2`.
   its own deadline, because nginx does not intercept an upstream HTTP 408;
   final fallback roles can keep 408 visible to clients and monitoring.
 
+- feat(imagor): `IMAGOR_CONTENT_ETAG` (default off) sets a strong
+  `ETag: "<md5 of body>-<format>"` on fresh and result-storage responses alike,
+  answers a matching `If-None-Match` (list, `W/`, `*`) with 304, ignores
+  `If-Modified-Since` when `If-None-Match` is present and drops `Last-Modified`.
+  Caches in front (nginx `proxy_cache_revalidate`) revalidate by content, and a
+  regenerated image with other bytes gets a new ETag.
+- feat(storage): `Stat.ContentMD5` lets a storage hand over a known md5.
+  filestorage publishes a file atomically (temp file in the same dir, xattr
+  `user.imagor.md5 = <md5>:<size>`, then rename, or link for SaveErrIfExists),
+  trusts the attribute only when the size matches and backfills it on the first
+  read of an older file; s3storage takes the md5 from a single-part S3 ETag.
+
 All listed changes are candidates for an upstream PR (kept out of the PR branch; fork-only doc).
