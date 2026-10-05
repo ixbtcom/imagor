@@ -107,7 +107,9 @@ func contentMD5(path string, size int64) string {
 		return ""
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
-	_ = setContentMD5Path(path, sum+":"+strconv.FormatInt(n, 10))
+	// on the open descriptor: if Put replaced the path meanwhile, the attribute
+	// lands on the inode that was hashed, never on the new file
+	_ = setContentMD5Fd(f, sum+":"+strconv.FormatInt(n, 10))
 	return sum
 }
 

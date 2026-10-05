@@ -36,6 +36,11 @@ Base: upstream `v1.9.2`.
   filestorage publishes a file atomically (temp file in the same dir, xattr
   `user.imagor.md5 = <md5>:<size>`, then rename, or link for SaveErrIfExists),
   trusts the attribute only when the size matches and backfills it on the first
-  read of an older file; s3storage takes the md5 from a single-part S3 ETag.
+  read of an older file (through the descriptor that was hashed, so a concurrent
+  Put cannot get a foreign md5); s3storage takes the md5 from a single-part S3 ETag.
+  filestorage fills `Stat.ContentMD5` regardless of `IMAGOR_CONTENT_ETAG`: reading
+  the attribute is one syscall, and a file without it is hashed once. A process
+  killed between the temp file and the rename leaves `<dir>/.imagor-*`; they are
+  dotfiles (never served) and can be swept with `find <dir> -name '.imagor-*' -mmin +60 -delete`.
 
 All listed changes are candidates for an upstream PR (kept out of the PR branch; fork-only doc).
