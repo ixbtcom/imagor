@@ -72,6 +72,8 @@ type Stat struct {
 	ModifiedTime time.Time
 	ETag         string
 	Size         int64
+	// ContentMD5 is the hex md5 of the blob content when the storage already knows it, empty otherwise
+	ContentMD5 string
 }
 
 // NewBlob creates imagor Blob from io.ReadCloser and size

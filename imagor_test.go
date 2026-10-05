@@ -3375,3 +3375,122 @@ func TestGetResultKey(t *testing.T) {
 	assert.NotNil(t, resultStore.Map["space-a/photo.jpg"])
 	assert.Nil(t, resultStore.Map["photo.jpg"])
 }
+
+func TestContentETagFormat(t *testing.T) {
+	cases := map[string]string{
+		"image/jpeg":                "jpeg",
+		"image/png":                 "png",
+		"image/webp":                "webp",
+		"image/avif":                "avif",
+		"image/gif":                 "gif",
+		"application/json":          "json",
+		"text/plain; charset=utf-8": "plain",
+		"":                          "bin",
+	}
+	for contentType, want := range cases {
+		assert.Equal(t, want, etagFormat(contentType), contentType)
+	}
+}
+
+func TestContentETagUsesStoredMD5(t *testing.T) {
+	blob := NewBlobFromBytes([]byte("foo"))
+	blob.Stat = &Stat{ContentMD5: "0123456789abcdef0123456789abcdef"}
+	assert.Equal(t, `"0123456789abcdef0123456789abcdef-plain"`, contentETag(blob))
+
+	blob = NewBlobFromBytes([]byte("foo"))
+	blob.Stat = &Stat{ContentMD5: "not-a-md5"}
+	assert.Equal(t, `"acbd18db4cc2f85cedef654fccc4a4d8-plain"`, contentETag(blob))
+}
+
+func TestContentETagResponses(t *testing.T) {
+	resultStore := newMapStore()
+	app := New(
+		WithResultStorages(resultStore),
+		WithLoaders(loaderFunc(func(r *http.Request, image string) (*Blob, error) {
+			return NewBlobFromBytes([]byte(image)), nil
+		})),
+		WithUnsafe(true),
+		WithContentETag(true),
+	)
+	const etag = `"acbd18db4cc2f85cedef654fccc4a4d8-plain"`
+	get := func(header map[string]string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "https://example.com/unsafe/foo", nil)
+		for k, v := range header {
+			r.Header.Set(k, v)
+		}
+		app.ServeHTTP(w, r)
+		return w
+	}
+
+	// свежая генерация уже несёт ETag по содержимому и не несёт Last-Modified
+	w := get(nil)
+	time.Sleep(time.Millisecond * 10) // make sure storage reached
+	assert.Equal(t, 200, w.Code)
+	assert.Equal(t, etag, w.Header().Get("ETag"))
+	assert.Empty(t, w.Header().Get("Last-Modified"))
+
+	// ответ из result storage - тот же ETag
+	w = get(nil)
+	assert.Equal(t, 200, w.Code)
+	assert.Equal(t, "foo", w.Body.String())
+	assert.Equal(t, etag, w.Header().Get("ETag"))
+	assert.Empty(t, w.Header().Get("Last-Modified"))
+
+	for _, inm := range []string{etag, `"x", ` + etag, "W/" + etag, "*"} {
+		w = get(map[string]string{"If-None-Match": inm})
+		assert.Equal(t, 304, w.Code, inm)
+		assert.Empty(t, w.Body.String(), inm)
+		assert.Equal(t, etag, w.Header().Get("ETag"), inm)
+	}
+
+	// If-None-Match главнее If-Modified-Since
+	w = get(map[string]string{
+		"If-None-Match":     `"other-plain"`,
+		"If-Modified-Since": time.Now().Add(time.Hour).UTC().Format(http.TimeFormat),
+	})
+	assert.Equal(t, 200, w.Code)
+	assert.Equal(t, "foo", w.Body.String())
+
+	w = get(map[string]string{"If-None-Match": etag, "Cache-Control": "no-cache"})
+	assert.Equal(t, 200, w.Code)
+
+	w = httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodHead, "https://example.com/unsafe/foo", nil)
+	r.Header.Set("If-None-Match", etag)
+	app.ServeHTTP(w, r)
+	assert.Equal(t, 304, w.Code)
+}
+
+func TestContentETagWithModifiedTimeCheck(t *testing.T) {
+	resultStore := newMapStore()
+	sourceStore := newMapStore()
+	app := New(
+		WithStorages(sourceStore),
+		WithResultStorages(resultStore),
+		WithLoaders(loaderFunc(func(r *http.Request, image string) (*Blob, error) {
+			return NewBlobFromBytes([]byte("v1")), nil
+		})),
+		WithUnsafe(true),
+		WithModifiedTimeCheck(true),
+		WithContentETag(true),
+	)
+	w := httptest.NewRecorder()
+	app.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "https://example.com/unsafe/fit-in/foo", nil))
+	time.Sleep(time.Millisecond * 10)
+	require.Equal(t, 200, w.Code)
+	first := w.Header().Get("ETag")
+	require.NotEmpty(t, first)
+
+	// исходник обновился позже результата - результат перегенерируется, ETag следует за байтами
+	require.NoError(t, sourceStore.Put(context.Background(), "foo", NewBlobFromBytes([]byte("v2"))))
+	resultStore.l.Lock()
+	resultStore.Map["fit-in/foo"] = NewBlobFromBytes([]byte("v1"))
+	resultStore.ModTime["fit-in/foo"] = clock.Add(-time.Hour)
+	resultStore.l.Unlock()
+	w = httptest.NewRecorder()
+	app.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "https://example.com/unsafe/fit-in/foo", nil))
+	require.Equal(t, 200, w.Code)
+	assert.Equal(t, "v2", w.Body.String())
+	assert.NotEqual(t, first, w.Header().Get("ETag"))
+}

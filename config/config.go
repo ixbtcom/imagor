@@ -70,6 +70,8 @@ func NewImagor(
 			false, "imagor HTTP Cache-Control header no-cache for successful image response")
 		imagorModifiedTimeCheck = fs.Bool("imagor-modified-time-check", false,
 			"Check modified time of result image against the source image. This eliminates stale result but require more lookups")
+		imagorContentETag = fs.Bool("imagor-content-etag", false,
+			"Set ETag from the md5 of the response body on every response and answer If-None-Match with 304; Last-Modified is not sent")
 		imagorDisableErrorBody       = fs.Bool("imagor-disable-error-body", false, "imagor disable response body on error")
 		imagorDisableParamsEndpoint  = fs.Bool("imagor-disable-params-endpoint", false, "imagor disable /params endpoint")
 		imagorResponseRawOnError     = fs.Bool("imagor-response-raw-on-error", false, "imagor response with a raw unprocessed and unchecked source image on error")
@@ -124,6 +126,7 @@ func NewImagor(
 		imagor.WithAutoAVIF(*imagorAutoAVIF),
 		imagor.WithAutoJPEG(*imagorAutoJPEG),
 		imagor.WithModifiedTimeCheck(*imagorModifiedTimeCheck),
+		imagor.WithContentETag(*imagorContentETag),
 		imagor.WithDisableErrorBody(*imagorDisableErrorBody),
 		imagor.WithDisableParamsEndpoint(*imagorDisableParamsEndpoint),
 		imagor.WithResponseRawOnError(*imagorResponseRawOnError),

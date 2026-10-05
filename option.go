@@ -199,6 +199,14 @@ func WithModifiedTimeCheck(enabled bool) Option {
 	}
 }
 
+// WithContentETag with option to set ETag from the md5 of the response body and
+// answer If-None-Match with 304, on fresh and result storage responses alike
+func WithContentETag(enabled bool) Option {
+	return func(app *Imagor) {
+		app.ContentETag = enabled
+	}
+}
+
 // WithDisableErrorBody with disable error body option, resulting empty response on error
 func WithDisableErrorBody(disabled bool) Option {
 	return func(app *Imagor) {

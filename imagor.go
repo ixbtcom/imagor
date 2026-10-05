@@ -2,6 +2,8 @@ package imagor
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,6 +106,7 @@ type Imagor struct {
 	AutoAVIF               bool
 	AutoJPEG               bool
 	ModifiedTimeCheck      bool
+	ContentETag            bool
 	DisableErrorBody       bool
 	DisableParamsEndpoint  bool
 	EnablePostRequests     bool
@@ -242,7 +245,12 @@ func (app *Imagor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app.setResponseHeaders(w, r, blob, p)
-	if blob != nil && checkStatNotModified(w, r, blob.Stat) {
+	if app.ContentETag {
+		if checkContentNotModified(w, r, contentETag(blob)) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	} else if blob != nil && checkStatNotModified(w, r, blob.Stat) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -1001,6 +1009,78 @@ func checkStatNotModified(w http.ResponseWriter, r *http.Request, stat *Stat) bo
 		}
 	}
 	return isETagMatch || isNotModified
+}
+
+// contentETag returns a strong ETag "<md5>-<format>" of the blob content,
+// taking the md5 from Stat.ContentMD5 when the storage provided it, or empty on read error
+func contentETag(blob *Blob) string {
+	sum := ""
+	if blob.Stat != nil && isHexMD5(blob.Stat.ContentMD5) {
+		sum = blob.Stat.ContentMD5
+	} else {
+		reader, _, err := blob.NewReader()
+		if err != nil {
+			return ""
+		}
+		h := md5.New()
+		_, err = io.Copy(h, reader)
+		_ = reader.Close()
+		if err != nil {
+			return ""
+		}
+		sum = hex.EncodeToString(h.Sum(nil))
+	}
+	return fmt.Sprintf("%q", sum+"-"+etagFormat(blob.ContentType()))
+}
+
+// isHexMD5 reports whether s is a lowercase hex md5 digest
+func isHexMD5(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// etagFormat returns the ETag format suffix of a content type: image/avif -> avif
+func etagFormat(contentType string) string {
+	mediaType, _, _ := strings.Cut(contentType, ";")
+	_, sub, _ := strings.Cut(strings.TrimSpace(mediaType), "/")
+	var b strings.Builder
+	for _, c := range strings.ToLower(sub) {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '+' || c == '-' {
+			b.WriteRune(c)
+		}
+	}
+	if b.Len() == 0 {
+		return "bin"
+	}
+	return b.String()
+}
+
+// checkContentNotModified sets the content ETag, drops Last-Modified and
+// reports whether If-None-Match matches it; If-Modified-Since is not used (RFC 9110 13.2.2)
+func checkContentNotModified(w http.ResponseWriter, r *http.Request, etag string) bool {
+	w.Header().Del("Last-Modified")
+	w.Header().Del("ETag")
+	if etag == "" {
+		return false
+	}
+	w.Header().Set("ETag", etag)
+	if strings.Contains(r.Header.Get("Cache-Control"), "no-cache") {
+		return false
+	}
+	for _, candidate := range strings.Split(r.Header.Get("If-None-Match"), ",") {
+		candidate = strings.TrimPrefix(strings.TrimSpace(candidate), "W/")
+		if candidate == "*" || candidate == etag {
+			return true
+		}
+	}
+	return false
 }
 
 func getTtl(p imagorpath.Params, defaultTtl time.Duration) time.Duration {
