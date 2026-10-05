@@ -672,3 +672,31 @@ func TestLocalstackCompatibility(t *testing.T) {
 		})
 	}
 }
+
+func TestContentMD5FromETag(t *testing.T) {
+	assert.Equal(t, "d41d8cd98f00b204e9800998ecf8427e", contentMD5FromETag(`"d41d8cd98f00b204e9800998ecf8427e"`))
+	assert.Equal(t, "d41d8cd98f00b204e9800998ecf8427e", contentMD5FromETag(`"D41D8CD98F00B204E9800998ECF8427E"`))
+	assert.Empty(t, contentMD5FromETag(`"d41d8cd98f00b204e9800998ecf8427e-3"`))
+	assert.Empty(t, contentMD5FromETag(`"abc"`))
+	assert.Empty(t, contentMD5FromETag(""))
+}
+
+func TestCRUDContentMD5(t *testing.T) {
+	ts := fakeS3Server()
+	defer ts.Close()
+	ctx := context.Background()
+	r := (&http.Request{}).WithContext(ctx)
+	s := New(fakeS3Config(ts, "test"), "test", WithEndpoint(ts.URL), WithForcePathStyle(true))
+	require.NoError(t, s.Put(ctx, "/foo/md5", imagor.NewBlobFromBytes([]byte("bar"))))
+
+	stat, err := s.Stat(ctx, "/foo/md5")
+	require.NoError(t, err)
+	assert.Equal(t, "37b51d194a7513e45b56f6524f2d51f2", stat.ContentMD5)
+
+	b, err := s.Get(r, "/foo/md5")
+	require.NoError(t, err)
+	_, err = b.ReadAll()
+	require.NoError(t, err)
+	require.NotNil(t, b.Stat)
+	assert.Equal(t, "37b51d194a7513e45b56f6524f2d51f2", b.Stat.ContentMD5)
+}

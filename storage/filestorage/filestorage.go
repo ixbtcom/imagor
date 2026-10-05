@@ -2,17 +2,24 @@ package filestorage
 
 import (
 	"context"
+	"crypto/md5"
+	"crypto/rand"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cshum/imagor"
 	"github.com/cshum/imagor/imagorpath"
 )
+
+// contentMD5Xattr is the extended attribute holding "<md5>:<size>" of a stored file
+const contentMD5Xattr = "user.imagor.md5"
 
 var dotFileRegex = regexp.MustCompile("/\\.")
 
@@ -72,7 +79,36 @@ func (s *FileStorage) Get(_ *http.Request, image string) (*imagor.Blob, error) {
 		}
 		return nil
 	})
+	if blob.Err() == nil && blob.Stat != nil {
+		blob.Stat.ContentMD5 = contentMD5(image, blob.Stat.Size)
+	}
 	return blob, blob.Err()
+}
+
+// contentMD5 returns the hex md5 of the file content from its "<md5>:<size>" attribute
+// when the size still matches, otherwise hashes the file and stores the attribute (best effort)
+func contentMD5(path string, size int64) string {
+	if sum, n, ok := strings.Cut(getContentMD5Xattr(path), ":"); ok &&
+		len(sum) == 32 && n == strconv.FormatInt(size, 10) {
+		if _, err := hex.DecodeString(sum); err == nil {
+			return sum
+		}
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+	h := md5.New()
+	n, err := io.Copy(h, f)
+	if err != nil || n != size {
+		return ""
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+	_ = setContentMD5Path(path, sum+":"+strconv.FormatInt(n, 10))
+	return sum
 }
 
 // Put implements imagor.Storage interface
@@ -91,27 +127,34 @@ func (s *FileStorage) Put(_ context.Context, image string, blob *imagor.Blob) (e
 	defer func() {
 		_ = reader.Close()
 	}()
-	flag := os.O_RDWR | os.O_CREATE | os.O_TRUNC
-	if s.SaveErrIfExists {
-		flag = os.O_RDWR | os.O_CREATE | os.O_EXCL
+	// write a temp file in the same dir with its md5 attribute, then publish it atomically,
+	// so a reader never sees new content with the md5 of the old one
+	var suffix [8]byte
+	if _, err = rand.Read(suffix[:]); err != nil {
+		return
 	}
-	w, err := os.OpenFile(image, flag, s.WritePermission)
+	tmp := filepath.Join(filepath.Dir(image), ".imagor-"+hex.EncodeToString(suffix[:]))
+	w, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_EXCL, s.WritePermission)
 	if err != nil {
 		return
 	}
 	defer func() {
 		_ = w.Close()
-		if err != nil {
-			_ = os.Remove(w.Name())
-		}
+		_ = os.Remove(tmp)
 	}()
-	if _, err = io.Copy(w, reader); err != nil {
+	h := md5.New()
+	n, err := io.Copy(io.MultiWriter(w, h), reader)
+	if err != nil {
 		return
 	}
 	if err = w.Sync(); err != nil {
 		return
 	}
-	return
+	_ = setContentMD5Fd(w, hex.EncodeToString(h.Sum(nil))+":"+strconv.FormatInt(n, 10))
+	if s.SaveErrIfExists {
+		return os.Link(tmp, image)
+	}
+	return os.Rename(tmp, image)
 }
 
 // Delete implements imagor.Storage interface

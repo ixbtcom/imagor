@@ -1014,6 +1014,8 @@ func checkStatNotModified(w http.ResponseWriter, r *http.Request, stat *Stat) bo
 // contentETag returns a strong ETag "<md5>-<format>" of the blob content,
 // taking the md5 from Stat.ContentMD5 when the storage provided it, or empty on read error
 func contentETag(blob *Blob) string {
+	// ContentType initialises the blob, which lets lazy storages such as S3 fill Stat
+	format := etagFormat(blob.ContentType())
 	sum := ""
 	if blob.Stat != nil && isHexMD5(blob.Stat.ContentMD5) {
 		sum = blob.Stat.ContentMD5
@@ -1030,7 +1032,7 @@ func contentETag(blob *Blob) string {
 		}
 		sum = hex.EncodeToString(h.Sum(nil))
 	}
-	return fmt.Sprintf("%q", sum+"-"+etagFormat(blob.ContentType()))
+	return fmt.Sprintf("%q", sum+"-"+format)
 }
 
 // isHexMD5 reports whether s is a lowercase hex md5 digest

@@ -2,6 +2,7 @@ package s3storage
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -163,6 +164,7 @@ func (s *S3Storage) Get(r *http.Request, image string) (*imagor.Blob, error) {
 					Size:         *out.ContentLength,
 					ETag:         *out.ETag,
 					ModifiedTime: *out.LastModified,
+					ContentMD5:   contentMD5FromETag(*out.ETag),
 				}
 			}
 		})
@@ -252,7 +254,21 @@ func (s *S3Storage) Stat(ctx context.Context, image string) (stat *imagor.Stat, 
 		Size:         *head.ContentLength,
 		ETag:         *head.ETag,
 		ModifiedTime: *head.LastModified,
+		ContentMD5:   contentMD5FromETag(aws.ToString(head.ETag)),
 	}, nil
+}
+
+// contentMD5FromETag returns the hex md5 of the object content when the S3 ETag is
+// a plain md5 (single part upload), empty for multipart "<hash>-<parts>" or other ETags
+func contentMD5FromETag(etag string) string {
+	sum := strings.ToLower(strings.Trim(etag, `"`))
+	if len(sum) != 32 {
+		return ""
+	}
+	if _, err := hex.DecodeString(sum); err != nil {
+		return ""
+	}
+	return sum
 }
 
 // Helper function for not found errors
