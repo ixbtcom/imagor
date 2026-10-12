@@ -80,6 +80,36 @@ func TestWrapErrUsesTrackedSourceFailureWhenVipsBufferIsEmpty(t *testing.T) {
 
 func (r *nonSeekableReadCloser) Close() error { return nil }
 
+func TestNoUpscaleCropLargerThanMultiPageSourceOnOneSide(t *testing.T) {
+	v := NewProcessor()
+	require.NoError(t, v.Startup(context.Background()))
+
+	// dancing-banana.gif is 121x128: each box exceeds the source on one side only.
+	for _, tc := range []struct {
+		path          string
+		width, height int
+	}{
+		{"150x100/filters:no_upscale():format(webp)", 121, 100},
+		{"100x150/smart/filters:no_upscale():format(webp)", 100, 128},
+		{"150x100/filters:no_upscale()", 121, 100},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			params := imagorpath.Parse("/unsafe/" + tc.path + "/dancing-banana.gif")
+			blob := imagor.NewBlobFromFile(filepath.Join(testDataDir, "dancing-banana.gif"))
+			out, err := v.Process(context.Background(), blob, params, nil)
+			require.NoError(t, err)
+			ctx := withContext(context.Background())
+			defer contextDone(ctx)
+			img, err := v.NewImage(ctx, out, -1, 1, 0)
+			require.NoError(t, err)
+			defer img.Close()
+			assert.Greater(t, img.Pages(), 1, "animation must be kept")
+			assert.Equal(t, tc.width, img.Width())
+			assert.Equal(t, tc.height, img.PageHeight())
+		})
+	}
+}
+
 func TestMain(m *testing.M) {
 	vips.Startup(&vips.Config{
 		ReportLeaks: true,

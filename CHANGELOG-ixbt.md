@@ -42,5 +42,11 @@ Base: upstream `v1.9.2`.
   the attribute is one syscall, and a file without it is hashed once. A process
   killed between the temp file and the rename leaves `<dir>/.imagor-*`; they are
   dotfiles (never served) and can be swept with `find <dir> -name '.imagor-*' -mmin +60 -delete`.
+- fix(vipsprocessor): `animatedThumbnailWithCrop` clamps the crop box to the
+  frame. With `no_upscale()` (our `IMAGOR_BASE_PARAMS`) a WebP/GIF source to an
+  animation-capable output (WebP) went through the multi-page path even for a
+  single frame, and a box larger than the frame on one side only failed with
+  `extract_area: bad extract area` (HTTP 406). It now crops to the frame, like
+  the single-page libvips thumbnail path: 569x502 -> `718x500` gives 569x500.
 
 All listed changes are candidates for an upstream PR (kept out of the PR branch; fork-only doc).

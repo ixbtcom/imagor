@@ -556,6 +556,10 @@ func (v *Processor) animatedThumbnailWithCrop(
 			return
 		}
 	}
+	// Without upscale the frame can stay smaller than the box on one side;
+	// crop to the frame there, as libvips thumbnail does for single-page images.
+	w = min(w, img.Width())
+	h = min(h, img.PageHeight())
 	if crop == vips.InterestingHigh {
 		left = img.Width() - w
 		top = img.PageHeight() - h
