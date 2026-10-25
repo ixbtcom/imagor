@@ -3423,25 +3423,50 @@ func TestContentETagResponses(t *testing.T) {
 		return w
 	}
 
-	// свежая генерация уже несёт ETag по содержимому и не несёт Last-Modified
+	// свежая генерация уже несёт ETag по содержимому и Last-Modified = время генерации
+	before := time.Now().Truncate(time.Second)
 	w := get(nil)
 	time.Sleep(time.Millisecond * 10) // make sure storage reached
 	assert.Equal(t, 200, w.Code)
 	assert.Equal(t, etag, w.Header().Get("ETag"))
-	assert.Empty(t, w.Header().Get("Last-Modified"))
+	freshLM, err := time.Parse(http.TimeFormat, w.Header().Get("Last-Modified"))
+	require.NoError(t, err)
+	assert.False(t, freshLM.Before(before))
+	assert.False(t, freshLM.After(time.Now()))
 
-	// ответ из result storage - тот же ETag
+	// ответ из result storage - тот же ETag, Last-Modified = время записи результата в хранилище
+	storedAt := time.Date(2026, 10, 1, 12, 0, 0, 500, time.FixedZone("MSK", 3*3600))
+	resultStore.l.Lock()
+	resultStore.ModTime["foo"] = storedAt
+	resultStore.l.Unlock()
+	const storedLM = "Thu, 01 Oct 2026 09:00:00 GMT"
 	w = get(nil)
 	assert.Equal(t, 200, w.Code)
 	assert.Equal(t, "foo", w.Body.String())
 	assert.Equal(t, etag, w.Header().Get("ETag"))
-	assert.Empty(t, w.Header().Get("Last-Modified"))
+	assert.Equal(t, storedLM, w.Header().Get("Last-Modified"))
+	// повторный ответ даёт ту же дату: ревалидация клиентов опирается на её стабильность
+	w = get(nil)
+	assert.Equal(t, storedLM, w.Header().Get("Last-Modified"))
+
+	// время записи из будущего не уходит наружу (Last-Modified не позже Date)
+	resultStore.l.Lock()
+	resultStore.ModTime["foo"] = time.Now().Add(time.Hour)
+	resultStore.l.Unlock()
+	w = get(nil)
+	futureLM, err := time.Parse(http.TimeFormat, w.Header().Get("Last-Modified"))
+	require.NoError(t, err)
+	assert.False(t, futureLM.After(time.Now()))
+	resultStore.l.Lock()
+	resultStore.ModTime["foo"] = storedAt
+	resultStore.l.Unlock()
 
 	for _, inm := range []string{etag, `"x", ` + etag, "W/" + etag, "*"} {
 		w = get(map[string]string{"If-None-Match": inm})
 		assert.Equal(t, 304, w.Code, inm)
 		assert.Empty(t, w.Body.String(), inm)
 		assert.Equal(t, etag, w.Header().Get("ETag"), inm)
+		assert.Equal(t, storedLM, w.Header().Get("Last-Modified"), inm)
 	}
 
 	// If-None-Match главнее If-Modified-Since

@@ -28,8 +28,13 @@ Base: upstream `v1.9.2`.
 
 - feat(imagor): `IMAGOR_CONTENT_ETAG` (default off) sets a strong
   `ETag: "<md5 of body>-<format>"` on fresh and result-storage responses alike,
-  answers a matching `If-None-Match` (list, `W/`, `*`) with 304, ignores
-  `If-Modified-Since` when `If-None-Match` is present and drops `Last-Modified`.
+  answers a matching `If-None-Match` (list, `W/`, `*`) with 304 and ignores
+  `If-Modified-Since` (the caches in front answer it). Since ixbt9 the response carries
+  `Last-Modified` = result storage write time (`Stat.ModifiedTime`: file mtime, S3
+  LastModified), for a fresh result the generation time, capped at now with second
+  precision; the value is the same for every later response until the result is
+  regenerated. It lets Googlebot-Image (which sends `If-Modified-Since`, not
+  `If-None-Match`) get 304 from the caches. Up to ixbt8 `Last-Modified` was dropped.
   Caches in front (nginx `proxy_cache_revalidate`) revalidate by content, and a
   regenerated image with other bytes gets a new ETag.
 - feat(storage): `Stat.ContentMD5` lets a storage hand over a known md5.

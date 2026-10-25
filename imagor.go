@@ -246,7 +246,7 @@ func (app *Imagor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	app.setResponseHeaders(w, r, blob, p)
 	if app.ContentETag {
-		if checkContentNotModified(w, r, contentETag(blob)) {
+		if checkContentNotModified(w, r, contentETag(blob), contentLastModified(blob, time.Now())) {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
@@ -1064,15 +1064,31 @@ func etagFormat(contentType string) string {
 	return b.String()
 }
 
-// checkContentNotModified sets the content ETag, drops Last-Modified and
-// reports whether If-None-Match matches it; If-Modified-Since is not used (RFC 9110 13.2.2)
-func checkContentNotModified(w http.ResponseWriter, r *http.Request, etag string) bool {
+// contentLastModified returns the Last-Modified of a response: the time the result was
+// written to its storage, or for a freshly generated blob (no Stat) the generation time.
+// The value stays the same for every later response served from the storage until the
+// result is regenerated, so clients can revalidate with If-Modified-Since. It never
+// exceeds now (Last-Modified must not be later than Date) and has second precision.
+func contentLastModified(blob *Blob, now time.Time) time.Time {
+	t := now
+	if blob != nil && blob.Stat != nil && !blob.Stat.ModifiedTime.IsZero() && blob.Stat.ModifiedTime.Before(now) {
+		t = blob.Stat.ModifiedTime
+	}
+	return t.UTC().Truncate(time.Second)
+}
+
+// checkContentNotModified sets the content ETag and Last-Modified (replacing the ones that
+// came from blob.Header) and reports whether If-None-Match matches the ETag;
+// If-Modified-Since is not used here (RFC 9110 13.1.3: If-None-Match takes precedence,
+// the caches in front answer If-Modified-Since themselves from the stored Last-Modified)
+func checkContentNotModified(w http.ResponseWriter, r *http.Request, etag string, lastModified time.Time) bool {
 	w.Header().Del("Last-Modified")
 	w.Header().Del("ETag")
 	if etag == "" {
 		return false
 	}
 	w.Header().Set("ETag", etag)
+	w.Header().Set("Last-Modified", lastModified.Format(http.TimeFormat))
 	if strings.Contains(r.Header.Get("Cache-Control"), "no-cache") {
 		return false
 	}

@@ -71,7 +71,7 @@ func NewImagor(
 		imagorModifiedTimeCheck = fs.Bool("imagor-modified-time-check", false,
 			"Check modified time of result image against the source image. This eliminates stale result but require more lookups")
 		imagorContentETag = fs.Bool("imagor-content-etag", false,
-			"Set ETag from the md5 of the response body on every response and answer If-None-Match with 304; Last-Modified is not sent")
+			"Set ETag from the md5 of the response body on every response and answer If-None-Match with 304; Last-Modified is the result storage write time (generation time for a fresh result)")
 		imagorDisableErrorBody       = fs.Bool("imagor-disable-error-body", false, "imagor disable response body on error")
 		imagorDisableParamsEndpoint  = fs.Bool("imagor-disable-params-endpoint", false, "imagor disable /params endpoint")
 		imagorResponseRawOnError     = fs.Bool("imagor-response-raw-on-error", false, "imagor response with a raw unprocessed and unchecked source image on error")
