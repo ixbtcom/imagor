@@ -66,12 +66,16 @@ IMAGOR_AUTO_WEBP=1         # Serve WebP automatically if browser supports
 IMAGOR_AUTO_AVIF=1         # Serve AVIF automatically if browser supports (experimental)
 IMAGOR_AUTO_JPEG=1         # Serve JPEG automatically if JPEG or no format requested
 
+IMAGOR_PASSTHROUGH_FORMATS=svg  # Serve a source format as-is for requests that ask for nothing: svg, or unset
+IMAGOR_SANITIZE_SVG=1       # Sanitize SVG before serving it through pass-through (default)
+
 IMAGOR_BASE_PARAMS=        # Base params applied to all images e.g. filters:watermark(logo.png)
 IMAGOR_SIGNER_TYPE=sha1    # URL signature algorithm: sha1, sha256, sha512 (default sha1)
 IMAGOR_SIGNER_TRUNCATE=    # Truncate URL signature to this length
 
 IMAGOR_RESULT_STORAGE_PATH_STYLE=original  # Result storage path style: original, digest, suffix
 IMAGOR_STORAGE_PATH_STYLE=original         # Loader storage path style: original, digest
+IMAGOR_STORAGE_SKIP_PREFIXES=              # Image prefixes read in place, never saved to Storage (csv)
 
 IMAGOR_CACHE_HEADER_TTL=168h              # HTTP Cache-Control max-age for successful responses (default 7d)
 IMAGOR_CACHE_HEADER_SWR=24h              # HTTP Cache-Control stale-while-revalidate (default 24h)
@@ -84,7 +88,7 @@ IMAGOR_SAVE_TIMEOUT=          # Storage save timeout
 IMAGOR_PROCESS_TIMEOUT=       # Image processing timeout
 
 IMAGOR_PROCESS_CONCURRENCY=-1   # Max concurrent image operations (-1 = unlimited)
-IMAGOR_PROCESS_QUEUE_SIZE=0     # Max queued requests before returning 429 (0 = unlimited)
+IMAGOR_PROCESS_QUEUE_SIZE=0     # Max queued requests before returning 429 (0 = no waiting queue)
 
 IMAGOR_BASE_PATH_REDIRECT=     # Redirect / base path to this URL
 IMAGOR_MODIFIED_TIME_CHECK=1   # Compare result vs source modified time to avoid stale results
@@ -167,6 +171,7 @@ S3_LOADER_BASE_DIR=          # Key prefix directory
 S3_LOADER_PATH_PREFIX=       # URL path prefix
 S3_LOADER_BUCKET_ROUTER_CONFIG=  # YAML config for multi-bucket routing by pattern
 S3_LOADER_ENDPOINT=          # Override S3 endpoint for Loader only
+S3_LOADER_ANONYMOUS=0        # 1: анонимные запросы Loader; по умолчанию false
 
 # Per-component AWS credential overrides for Loader
 AWS_LOADER_ACCESS_KEY_ID=
@@ -204,6 +209,8 @@ AWS_RESULT_STORAGE_SESSION_TOKEN=
 AWS_RESULT_STORAGE_REGION=
 ```
 
+`S3_LOADER_ANONYMOUS=1` (CLI: `-s3-loader-anonymous`) отключает подпись запросов обычного и маршрутизируемого S3 Loader, даже если заданы глобальные credentials или `AWS_LOADER_*`. Storage и Result Storage продолжают использовать свои credentials. Явная пара `access_key_id` / `secret_access_key` у бакета в YAML маршрутизатора переопределяет анонимный режим для этого бакета. Подробнее: [Анонимный S3 Loader](./storage-s3.md#анонимный-s3-loader-для-публичных-источников).
+
 ## Google Cloud Storage
 
 ```dotenv
@@ -240,8 +247,10 @@ UPLOAD_LOADER_FORM_FIELD_NAME=image     # Multipart form field name (default ima
 
 ## VIPS / Image Processing
 
+`VIPS_CONCURRENCY` sets the maximum number of libvips worker threads available to an individual image operation. It does not limit how many requests imagor processes at once; use `IMAGOR_PROCESS_CONCURRENCY` under [Imagor Core](#imagor-core) for request-level concurrency. Most deployments should keep `VIPS_CONCURRENCY` at `1`; change it only after benchmarking your workload. See [Benchmarks](./benchmarks.mdx) for measured comparisons.
+
 ```dotenv
-VIPS_CONCURRENCY=1           # libvips thread count per operation. -1 = auto (all CPU cores)
+VIPS_CONCURRENCY=1           # libvips threads per operation. -1 = all CPU cores
 
 # Safety limits
 VIPS_MAX_WIDTH=              # Maximum image width in pixels
@@ -249,7 +258,8 @@ VIPS_MAX_HEIGHT=             # Maximum image height in pixels
 VIPS_MAX_RESOLUTION=         # Maximum image resolution (width × height)
 VIPS_UNLIMITED=1             # Bypass all resolution limits (not recommended for public endpoints)
 VIPS_MAX_ANIMATION_FRAMES=   # Max animation frames to load. 1 = disable animation, -1 = unlimited
-VIPS_MAX_FILTER_OPS=-1       # Max filter operations per request (-1 = unlimited)
+VIPS_MAX_FILTER_OPS=-1       # Max filter operations per request. Some filters, such as
+                             # format and quality, are not counted. -1 = unlimited
 VIPS_DISABLE_BLUR=1          # Disable all blur operations
 VIPS_DISABLE_FILTERS=blur,watermark  # Disable specific filters (csv)
 

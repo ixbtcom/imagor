@@ -40,6 +40,8 @@ func WithAWS(fs *flag.FlagSet, cb func() (*zap.Logger, bool)) imagor.Option {
 			"AWS Session Token for S3 Loader to override global config")
 		s3LoaderEndpoint = fs.String("s3-loader-endpoint", "",
 			"Optional S3 Loader Endpoint to override default")
+		s3LoaderAnonymous = fs.Bool("s3-loader-anonymous", false,
+			"Use unsigned S3 Loader requests instead of global or loader-specific credentials")
 
 		awsStorageRegion = fs.String("aws-storage-region", "",
 			"AWS Region for S3 Storage to override global config")
@@ -150,6 +152,9 @@ func WithAWS(fs *flag.FlagSet, cb func() (*zap.Logger, bool)) imagor.Option {
 				Credentials: credentials.NewStaticCredentialsProvider(
 					*awsLoaderAccessKeyID, *awsLoaderSecretAccessKey, *awsLoaderSessionToken),
 			}
+		}
+		if *s3LoaderAnonymous {
+			loaderCfg.Credentials = aws.AnonymousCredentials{}
 		}
 
 		// Override storage config if specific credentials provided

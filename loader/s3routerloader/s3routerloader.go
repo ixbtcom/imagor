@@ -2,6 +2,8 @@ package s3routerloader
 
 import (
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -85,6 +87,15 @@ func (l *S3RouterLoader) getOrCreateDynamicLoader(bucket string) *s3storage.S3St
 func (l *S3RouterLoader) Get(r *http.Request, image string) (*imagor.Blob, error) {
 	cfg := l.router.ConfigFor(image)
 	key := l.router.KeyFor(image)
+	if key != image && (strings.HasPrefix(image, "https://") || strings.HasPrefix(image, "http://")) {
+		// An HTTP source has a URL-escaped object path. Decode that path once,
+		// without changing the original source identity or bare S3 key routing.
+		var err error
+		key, err = url.PathUnescape(key)
+		if err != nil {
+			return nil, imagor.ErrInvalid
+		}
+	}
 
 	var loader *s3storage.S3Storage
 

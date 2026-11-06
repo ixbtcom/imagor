@@ -2,14 +2,14 @@ package vipsprocessor
 
 import (
 	"context"
+	"sync"
 )
 
 // Global resource tracking context (persists across parent/child)
 type contextResourceKey struct{}
 
 type contextResource struct {
-	cbs           []func()
-	sourceReaders []sourceErrorReporter
+	cbs []func()
 }
 
 type sourceErrorReporter interface {
@@ -41,31 +41,12 @@ func contextDone(ctx context.Context) {
 	}
 }
 
-func contextTrackSource(ctx context.Context, source sourceErrorReporter) {
-	if source == nil {
-		return
-	}
-	if r, ok := ctx.Value(contextResourceKey{}).(*contextResource); ok {
-		r.sourceReaders = append(r.sourceReaders, source)
-	}
-}
-
-func contextSourceError(ctx context.Context) error {
-	if r, ok := ctx.Value(contextResourceKey{}).(*contextResource); ok {
-		for _, source := range r.sourceReaders {
-			if err := source.Err(); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 // Local rotation context (resets for each processing level)
 type contextRotateKey struct{}
 
 type contextRotate struct {
-	Rotate90 bool
+	Rotate90        bool
+	RotateArbitrary bool
 }
 
 // setRotate90 toggles rotation flag in current context (local to processing level)
@@ -83,6 +64,24 @@ func isRotate90(ctx context.Context) bool {
 	return false
 }
 
+// setRotateArbitrary sets flag indicating a non-orthogonal rotation was applied.
+// This signals to downstream filters (e.g. fill) that the image dimensions have
+// changed unpredictably and they should use the current image bounds rather than
+// the original target dimensions.
+func setRotateArbitrary(ctx context.Context) {
+	if r, ok := ctx.Value(contextRotateKey{}).(*contextRotate); ok {
+		r.RotateArbitrary = true
+	}
+}
+
+// isRotateArbitrary checks if an arbitrary-angle rotation was applied.
+func isRotateArbitrary(ctx context.Context) bool {
+	if r, ok := ctx.Value(contextRotateKey{}).(*contextRotate); ok {
+		return r.RotateArbitrary
+	}
+	return false
+}
+
 // withContext creates processing context with both global resource tracking and local rotation state
 // - Preserves parent's resource context (if exists) for global cleanup tracking
 // - Always creates fresh rotation context (local to this processing level)
@@ -96,4 +95,71 @@ func withContext(ctx context.Context) context.Context {
 	// This prevents parent's rotation from affecting nested image() processing
 	ctx = context.WithValue(ctx, contextRotateKey{}, &contextRotate{})
 	return ctx
+}
+
+// Report context for a path a filter loads (fresh for each filter).
+type contextReportsKey struct{}
+
+type contextReports struct {
+	child *filterReports
+}
+
+// withReportsHolder gives the next handler somewhere to leave the report for a
+// path it loaded, so the dispatch loop can nest it under that filter's entry.
+// The holder is shared by pointer: the handler writes into it and the loop reads
+// it once the handler returns.
+func withReportsHolder(ctx context.Context) (context.Context, *contextReports) {
+	h := &contextReports{}
+	return context.WithValue(ctx, contextReportsKey{}, h), h
+}
+
+// setChildReports records what the filters in a loaded path did.
+func setChildReports(ctx context.Context, r *filterReports) {
+	if h, ok := ctx.Value(contextReportsKey{}).(*contextReports); ok {
+		h.child = r
+	}
+}
+
+// Source read tracking for one Process call. libvips reports a failed read to
+// the loader as end of file, so a loader that only warns renders a half image
+// and reports success. The sources are asked once the render is done.
+type contextSourceReadKey struct{}
+
+type contextSourceRead struct {
+	lock    sync.Mutex
+	sources []sourceErrorReporter
+}
+
+// withSourceReadTracker gives this processing level somewhere to collect the
+// sources it opens. Each level gets its own, as a nested path does its own
+// loading.
+func withSourceReadTracker(ctx context.Context) (context.Context, *contextSourceRead) {
+	t := &contextSourceRead{}
+	return context.WithValue(ctx, contextSourceReadKey{}, t), t
+}
+
+// trackSourceRead records a source opened for this request.
+func trackSourceRead(ctx context.Context, src sourceErrorReporter) {
+	if t, ok := ctx.Value(contextSourceReadKey{}).(*contextSourceRead); ok {
+		t.lock.Lock()
+		t.sources = append(t.sources, src)
+		t.lock.Unlock()
+	}
+}
+
+// err returns the first read failure recorded for this request, if any.
+func (t *contextSourceRead) err() error {
+	if t == nil {
+		return nil
+	}
+	t.lock.Lock()
+	sources := t.sources
+	t.sources = nil
+	t.lock.Unlock()
+	for _, src := range sources {
+		if err := src.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
 }

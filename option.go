@@ -178,6 +178,28 @@ func WithAutoJPEG(enable bool) Option {
 	}
 }
 
+// WithSanitizeSVG with SVG sanitization option. Enabled by default, an SVG served
+// through passthrough is sanitized first; disabling serves the source byte for
+// byte, so it is only appropriate when every source is trusted.
+func WithSanitizeSVG(enable bool) Option {
+	return func(app *Imagor) {
+		app.SanitizeSVG = enable
+	}
+}
+
+// WithPassthroughFormats with source formats served as-is when a request asks
+// for no transformation. Formats are validated by ParsePassthroughFormats: one
+// that has not been considered (PDF, camera RAW) cannot be passed through.
+//
+// Enabling this changes the result storage key of requests that name no format,
+// so cached rasterized results are not served for requests that now pass
+// through.
+func WithPassthroughFormats(formats ...BlobType) Option {
+	return func(app *Imagor) {
+		app.PassthroughFormats = formats
+	}
+}
+
 // WithBasePathRedirect with base path redirect option
 func WithBasePathRedirect(url string) Option {
 	return func(app *Imagor) {
@@ -244,6 +266,16 @@ func WithStoragePathStyle(hasher imagorpath.StorageHasher) Option {
 		if hasher != nil {
 			app.StoragePathStyle = hasher
 		}
+	}
+}
+
+// WithStorageSkipPrefixes with image path prefixes read in place option. A
+// loaded image under one of these prefixes is loaded from its origin and never
+// read from or written to Storage. Prefixes match whole path parts; empty
+// prefixes are ignored.
+func WithStorageSkipPrefixes(prefixes ...string) Option {
+	return func(app *Imagor) {
+		app.StorageSkipPrefixes = append(app.StorageSkipPrefixes, prefixes...)
 	}
 }
 

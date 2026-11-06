@@ -34,6 +34,16 @@ For production-safe URLs, see [Security](./security.mdx). For the full filter pi
   - Base64 URLs: Use `b64:` prefix to encode image URLs with special characters as [base64url](https://developer.mozilla.org/en-US/docs/Glossary/Base64#url_and_filename_safe_base64)
   - Color image: Use `color:<color>` to generate a solid color or transparent image without loading from a source. See [Color Image](./color-image.md) section.
 
+## Image Formats
+
+imagor reads JPEG, PNG, WebP, AVIF, HEIF, JPEG XL, GIF, TIFF, JPEG 2000, SVG, PDF, BMP and camera RAW.
+
+It writes JPEG, PNG, WebP, AVIF, HEIF, JPEG XL, GIF, TIFF and JPEG 2000. Output defaults to the source format when imagor supports it, and to JPEG otherwise. Specify one with [`format()`](./filters.md#formatformat).
+
+SVG and PDF sources are rasterized. [`format(svg)`](./filters.md#formatsvg) serves an SVG source as the document itself instead.
+
+PSD, XCF and other legacy formats need the [ImageMagick variant](./imagemagick-support.md).
+
 ---
 
 ## Resize & Crop
@@ -276,19 +286,27 @@ The `IMAGE` path at the end supports several special forms:
   ```
   https%3A%2F%2Fexample.com%2Fimage.jpg%3Fv%3D123%26download%3D1
   ```
-- **Base64 URL** — use `b64:` prefix with [base64url](https://developer.mozilla.org/en-US/docs/Glossary/Base64#url_and_filename_safe_base64) encoding for URLs with special characters:
+- **Base64 URL** — use `b64:` prefix with unpadded [base64url](https://developer.mozilla.org/en-US/docs/Glossary/Base64#url_and_filename_safe_base64) encoding for URLs with special characters. Do not append a trailing slash to the encoded source:
   ```
   Source URL:
   https://example.com/image.jpg?size=large&download=1
 
   Endpoint form:
-  /unsafe/400x400/b64:aHR0cHM6Ly9leGFtcGxlLmNvbS9pbWFnZS5qcGc_c2l6ZT1sYXJnZSZkb3dubG9hZD0x/
+  /unsafe/400x400/b64:aHR0cHM6Ly9leGFtcGxlLmNvbS9pbWFnZS5qcGc_c2l6ZT1sYXJnZSZkb3dubG9hZD0x
   ```
   ```
-  /unsafe/400x400/b64:aHR0cHM6Ly9leGFtcGxlLmNvbS9pbWFnZS5qcGc=/
+  /unsafe/400x400/b64:aHR0cHM6Ly9leGFtcGxlLmNvbS9pbWFnZS5qcGc
   ```
 - **Color image** — use `color:<color>` to generate a solid color or transparent image without loading from a source. Supports named colors, `none`, and hex values with optional alpha. See [Color Image](./color-image.md).
   ```
   /unsafe/400x400/color:ff8800
   /unsafe/400x400/color:none
   ```
+
+---
+
+## Ultra HDR
+
+Ultra HDR photos are JPEGs with a gain map, as written by recent Android phones and iPhones. imagor reads and writes them as Ultra HDR JPEGs: resize, crop, trim, flip, rotate and padding apply the same geometry to the gain map, so HDR displays keep the highlights while SDR displays show the tone-mapped image.
+
+The gain map is dropped when the output is not JPEG, for example with `format(webp)`, or when metadata is stripped with `strip_metadata()` or `-vips-strip-metadata`. The [MozJPEG variant](./mozjpeg-support.md) writes JPEG without it.

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/gif"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,7 +22,7 @@ import (
 	"github.com/cshum/imagor"
 	"github.com/cshum/imagor/imagorpath"
 	"github.com/cshum/imagor/storage/filestorage"
-	"github.com/cshum/vipsgen/vips"
+	"github.com/cshum/vipsgen/v2/vips"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -242,39 +243,6 @@ func TestProcessor(t *testing.T) {
 			assert.Contains(t, w.Body.String(), "read error")
 		})
 	})
-	t.Run("process preserves tracked source failure when vips buffer is empty", func(t *testing.T) {
-		payload := []byte("truncated")
-		blob := imagor.NewBlob(func() (io.ReadCloser, int64, error) {
-			return &nonSeekableReadCloser{Reader: bytes.NewReader(payload)}, int64(len(payload) + 10), nil
-		})
-
-		previous := v.processFunc
-		v.processFunc = func(
-			ctx context.Context, blob *imagor.Blob, _ imagorpath.Params, _ imagor.LoadFunc,
-		) (*imagor.Blob, error) {
-			_, err := v.newSourceFromBlob(ctx, blob)
-			require.NoError(t, err)
-
-			resource, ok := ctx.Value(contextResourceKey{}).(*contextResource)
-			require.True(t, ok)
-			require.Len(t, resource.sourceReaders, 1)
-			tracker, ok := resource.sourceReaders[0].(*sourceReadTracker)
-			require.True(t, ok)
-			_, err = io.ReadAll(tracker)
-			require.NoError(t, err)
-			require.ErrorIs(t, tracker.Err(), io.ErrUnexpectedEOF)
-
-			return nil, errors.New("vips: empty error buffer")
-		}
-		defer func() { v.processFunc = previous }()
-
-		_, err := v.Process(context.Background(), blob, imagorpath.Params{}, nil)
-		require.Error(t, err)
-		imagorErr, ok := err.(imagor.Error)
-		require.True(t, ok)
-		assert.Equal(t, http.StatusFailedDependency, imagorErr.Code)
-		assert.Contains(t, imagorErr.Message, "vips: empty error buffer")
-	})
 	t.Run("vips lossless filter", func(t *testing.T) {
 		var resultDir = filepath.Join(testDataDir, "golden")
 		doGoldenTests(t, resultDir, []test{
@@ -334,6 +302,33 @@ func TestProcessor(t *testing.T) {
 				require.Equal(t, 0.0, maxDiff, "non-zero pixel diff means encoding was lossy")
 			})
 		}
+	})
+	t.Run("invert filter round-trip pixel-exact", func(t *testing.T) {
+		filterFn, ok := v.Filters["invert"]
+		require.True(t, ok, "invert filter must be registered")
+
+		src, err := vips.NewImageFromFile(filepath.Join(testDataDir, "gopher-front.png"), nil)
+		require.NoError(t, err)
+		defer src.Close()
+
+		out, err := vips.NewImageFromFile(filepath.Join(testDataDir, "gopher-front.png"), nil)
+		require.NoError(t, err)
+		defer out.Close()
+
+		_, err = filterFn(context.Background(), out, nil)
+		require.NoError(t, err)
+		_, err = filterFn(context.Background(), out, nil)
+		require.NoError(t, err)
+
+		require.Equal(t, src.Width(), out.Width(), "width must match")
+		require.Equal(t, src.Height(), out.Height(), "height must match")
+		require.Equal(t, src.Bands(), out.Bands(), "band count must match")
+
+		require.NoError(t, out.Subtract(src))
+		require.NoError(t, out.Abs())
+		maxDiff, err := out.Max(nil)
+		require.NoError(t, err)
+		require.Equal(t, 0.0, maxDiff, "double invert must restore original pixels")
 	})
 	t.Run("meta", func(t *testing.T) {
 		var resultDir = filepath.Join(testDataDir, "golden")
@@ -441,6 +436,10 @@ func TestProcessor(t *testing.T) {
 			{name: "blur sharpen 2", path: "200x-210/top/filters:blur(1,2):sharpen(1,2):background_color(ff0):format(jpeg):quality(70)/gopher.png"},
 			{name: "crop stretch top flip", path: "10x20:3000x5000/stretch/100x200/filters:brightness(-20):contrast(50):rgb(10,-50,30):fill(black)/gopher.png"},
 			{name: "crop-percent stretch top flip", path: "0.006120x0.008993:1.0x1.0/stretch/100x200/filters:brightness(-20):contrast(50):rgb(10,-50,30):fill(black)/gopher.png"},
+			{name: "rotate 45 still", path: "filters:rotate(45)/gopher-front.png"},
+			{name: "rotate 45 fill", path: "filters:rotate(45):fill(yellow)/gopher-front.png"},
+			{name: "rotate -45", path: "filters:rotate(-45)/gopher-front.png"},
+			{name: "rotate 45 animated", path: "filters:rotate(45)/dancing-banana.gif", arm64Golden: true},
 			{name: "padding rotation fill blur grayscale", path: "/fit-in/200x210/20x20/filters:rotate(90):rotate(270):rotate(180):fill(blur):grayscale()/gopher.png"},
 			{name: "fill round_corner", path: "fit-in/0x210/filters:fill(yellow):round_corner(40,60,green)/gopher.png"},
 			{name: "grayscale fill none", path: "fit-in/100x100/filters:fill(none)/2bands.png", checkTypeOnly: true},
@@ -837,6 +836,49 @@ func TestProcessor(t *testing.T) {
 		defer img.Close()
 		assert.Greater(t, img.Height(), img.PageHeight(), "expected animated frames to be preserved")
 	})
+	t.Run("animated gif filters apply without dropping frames", func(t *testing.T) {
+		app := imagor.New(
+			imagor.WithLoaders(filestorage.New(testDataDir)),
+			imagor.WithUnsafe(true),
+			imagor.WithProcessors(NewProcessor()),
+		)
+		require.NoError(t, app.Startup(context.Background()))
+		t.Cleanup(func() {
+			assert.NoError(t, app.Shutdown(context.Background()))
+		})
+
+		fetch := func(path string) []byte {
+			w := httptest.NewRecorder()
+			app.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/unsafe/"+path, nil))
+			require.Equal(t, 200, w.Code)
+			return w.Body.Bytes()
+		}
+
+		baseline := fetch("dancing-banana.gif")
+		baseGIF, err := gif.DecodeAll(bytes.NewReader(baseline))
+		require.NoError(t, err)
+
+		for _, tt := range []struct {
+			name string
+			path string
+		}{
+			{name: "pixelate", path: "filters:pixelate(8)/dancing-banana.gif"},
+			{name: "saturation", path: "filters:saturation(-50)/dancing-banana.gif"},
+			{name: "hue", path: "filters:hue(60)/dancing-banana.gif"},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				body := fetch(tt.path)
+				assert.False(t, bytes.Equal(baseline, body), "filtered GIF must differ from baseline")
+
+				gotGIF, err := gif.DecodeAll(bytes.NewReader(body))
+				require.NoError(t, err)
+				assert.Len(t, gotGIF.Image, len(baseGIF.Image), "frame count must be preserved")
+				assert.Equal(t, baseGIF.Delay, gotGIF.Delay, "frame delays must be preserved")
+				assert.Equal(t, baseGIF.Disposal, gotGIF.Disposal, "disposal method must be preserved")
+				assert.Equal(t, baseGIF.LoopCount, gotGIF.LoopCount, "loop count must be preserved")
+			})
+		}
+	})
 	t.Run("resolution exceeded bmp 2", func(t *testing.T) {
 		app := imagor.New(
 			imagor.WithLoaders(filestorage.New(testDataDir)),
@@ -897,6 +939,29 @@ func TestProcessor(t *testing.T) {
 		w := httptest.NewRecorder()
 		app.ServeHTTP(w, httptest.NewRequest(
 			http.MethodGet, "/unsafe/dancing-banana.gif", nil))
+		assert.Equal(t, 422, w.Code)
+	})
+	t.Run("no memory leak when filter errors after image has been loaded", func(t *testing.T) {
+		app := imagor.New(
+			imagor.WithLoaders(filestorage.New(testDataDir)),
+			imagor.WithUnsafe(true),
+			imagor.WithDebug(true),
+			imagor.WithLogger(zap.NewExample()),
+			imagor.WithProcessors(NewProcessor(
+				WithDebug(true),
+				WithFilter("error", func(_ context.Context, _ *vips.Image, _ imagor.LoadFunc, _ ...string) (bool, error) {
+					return false, imagor.NewError("boom", 422)
+				}),
+			)),
+		)
+		require.NoError(t, app.Startup(context.Background()))
+		t.Cleanup(func() {
+			assert.NoError(t, app.Shutdown(context.Background()))
+		})
+		// memory leaks are caught by the ReportLeaks check
+		w := httptest.NewRecorder()
+		app.ServeHTTP(w, httptest.NewRequest(
+			http.MethodGet, "/unsafe/filters:error()/gopher-front.png", nil))
 		assert.Equal(t, 422, w.Code)
 	})
 	t.Run("image cache — LoadFromCache returns cached blob", func(t *testing.T) {
@@ -1009,28 +1074,6 @@ func TestProcessor(t *testing.T) {
 
 		_, ok := reader.(io.ReadSeeker)
 		assert.True(t, ok, "default source reader should be seekable")
-	})
-	t.Run("source reader preserves truncation after consumer loses error message", func(t *testing.T) {
-		payload := []byte("truncated")
-		blob := imagor.NewBlob(func() (io.ReadCloser, int64, error) {
-			return &nonSeekableReadCloser{Reader: bytes.NewReader(payload)}, int64(len(payload) + 10), nil
-		})
-
-		p := NewProcessor()
-		reader, err := p.newSourceReaderFromBlob(blob)
-		require.NoError(t, err)
-		defer func() { _ = reader.Close() }()
-		_, err = io.ReadAll(reader)
-		require.NoError(t, err)
-
-		tracker, ok := reader.(*sourceReadTracker)
-		require.True(t, ok)
-		assert.ErrorIs(t, tracker.Err(), io.ErrUnexpectedEOF)
-		wrapped := WrapErr(newSourceDependencyError(
-			errors.New("vips: empty error buffer"),
-			tracker.Err(),
-		))
-		assert.Equal(t, http.StatusFailedDependency, wrapped.(imagor.Error).Code)
 	})
 	t.Run("raw routed to dcrawload when available", func(t *testing.T) {
 		// BlobTypeRAF (Fuji RAF) with hasDcrawload=true must be routed to dcrawload,
@@ -1727,4 +1770,101 @@ type loaderFunc func(r *http.Request, image string) (blob *imagor.Blob, err erro
 
 func (f loaderFunc) Get(r *http.Request, image string) (*imagor.Blob, error) {
 	return f(r, image)
+}
+
+// truncatedReader serves half of its data and then reports err instead of
+// io.EOF, the way an interrupted upstream body or an expired load timeout looks
+// to the reader.
+type truncatedReader struct {
+	r   *bytes.Reader
+	err error
+}
+
+func (r *truncatedReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if err == io.EOF {
+		return 0, r.err
+	}
+	return n, err
+}
+
+func (r *truncatedReader) Seek(offset int64, whence int) (int64, error) {
+	return r.r.Seek(offset, whence)
+}
+
+func (r *truncatedReader) Close() error { return nil }
+
+func truncatedTestBlob(t *testing.T, image string) *imagor.Blob {
+	data, err := os.ReadFile(filepath.Join(testDataDir, image))
+	require.NoError(t, err)
+	return imagor.NewBlob(func() (io.ReadCloser, int64, error) {
+		return &truncatedReader{
+			r:   bytes.NewReader(data[:len(data)/2]),
+			err: io.ErrUnexpectedEOF,
+		}, int64(len(data)), nil
+	})
+}
+
+func TestProcessSourceReadError(t *testing.T) {
+	// libvips reports a failed source read to the loader as end of file, and
+	// jpegload with the default fail_on=none fills the missing part and
+	// succeeds, so the truncation only shows up here.
+	//
+	// No Shutdown: stopping the last processor shuts libvips down for every
+	// test after this one.
+	processor := NewProcessor()
+	require.NoError(t, processor.Startup(context.Background()))
+
+	t.Run("process fails", func(t *testing.T) {
+		out, err := processor.Process(context.Background(), truncatedTestBlob(t, "demo1.jpg"),
+			imagorpath.Params{Image: "demo1.jpg", Width: 100, Height: 100, FitIn: true}, nil)
+		var dependencyErr imagor.Error
+		require.ErrorAs(t, err, &dependencyErr)
+		assert.Equal(t, http.StatusFailedDependency, dependencyErr.Code)
+		assert.Nil(t, out)
+	})
+
+	t.Run("clean EOF before declared size fails", func(t *testing.T) {
+		data, err := os.ReadFile(filepath.Join(testDataDir, "demo1.jpg"))
+		require.NoError(t, err)
+		blob := imagor.NewBlob(func() (io.ReadCloser, int64, error) {
+			return &nonSeekableReadCloser{Reader: bytes.NewReader(data)}, int64(len(data) + 10), nil
+		})
+		out, err := processor.Process(context.Background(), blob,
+			imagorpath.Params{Image: "demo1.jpg", Width: 100, Height: 100, FitIn: true}, nil)
+		var dependencyErr imagor.Error
+		require.ErrorAs(t, err, &dependencyErr)
+		assert.Equal(t, http.StatusFailedDependency, dependencyErr.Code)
+		assert.Nil(t, out)
+	})
+
+	t.Run("result not stored", func(t *testing.T) {
+		// The half image must not reach result storage: it would be served from
+		// there long after the source recovered.
+		resultDir := t.TempDir()
+		app := imagor.New(
+			imagor.WithUnsafe(true),
+			imagor.WithLoaders(loaderFunc(func(r *http.Request, image string) (*imagor.Blob, error) {
+				return truncatedTestBlob(t, "demo1.jpg"), nil
+			})),
+			imagor.WithProcessors(processor),
+			imagor.WithResultStorages(filestorage.New(resultDir)),
+		)
+		require.NoError(t, app.Startup(context.Background()))
+		t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
+
+		w := httptest.NewRecorder()
+		app.ServeHTTP(w, httptest.NewRequest(
+			http.MethodGet, "/unsafe/fit-in/100x100/demo1.jpg", nil))
+		assert.Equal(t, http.StatusFailedDependency, w.Code)
+
+		stored := 0
+		require.NoError(t, filepath.Walk(resultDir, func(path string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() {
+				stored++
+			}
+			return nil
+		}))
+		assert.Zero(t, stored)
+	})
 }

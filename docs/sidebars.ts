@@ -54,8 +54,8 @@ const sidebars: SidebarsConfig = {
         "metadata-and-exif",
         "in-memory-cache",
         "color-image",
+        "nested-path",
         "benchmarks",
-        "vips-performance",
         "post-upload",
         "mozjpeg-support",
         "imagemagick-support",
@@ -71,6 +71,11 @@ const sidebars: SidebarsConfig = {
           "Extend imagor with additional capabilities through plugins.",
       },
       items: ["imagorvideo", "imagorface"],
+    },
+    {
+      type: "doc",
+      id: "imagor-mcp",
+      label: "MCP",
     },
     {
       type: "doc",

@@ -2,13 +2,12 @@ package vipsprocessor
 
 import (
 	"context"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/cshum/imagor"
 	"github.com/cshum/imagor/imagorpath"
-	"github.com/cshum/vipsgen/vips"
+	"github.com/cshum/vipsgen/v2/vips"
 )
 
 // loadOverlayImage loads a watermark overlay image using the image cache.
@@ -74,11 +73,16 @@ func (v *Processor) loadFilterImage(
 	ctx context.Context, blob *imagor.Blob, params imagorpath.Params, load imagor.LoadFunc,
 	url string,
 ) (*vips.Image, error) {
+	// A loaded path is a separate image with its own filters and its own dispatch
+	// loop, so it gets its own report. It is handed to the filter that loaded it
+	// rather than dropped, so a caller can see what the overlay's filters did.
+	reports := newFilterReports()
+	setChildReports(ctx, reports)
 	sizeKnown := params.Width > 0 && params.Height > 0
 
 	if v.cache == nil || blob == nil || !sizeKnown || imagorpath.HasCacheBypass(params) ||
 		params.Width > v.CacheMaxWidth || params.Height > v.CacheMaxHeight {
-		return v.loadAndProcess(ctx, blob, params, load)
+		return v.loadAndProcess(ctx, blob, params, load, reports)
 	}
 
 	memBlob, origBlob, err := v.loadOrCache(blob, url, 1, nil)
@@ -88,67 +92,15 @@ func (v *Processor) loadFilterImage(
 
 	if origBlob != nil || memBlob == nil {
 		// Animated source or cache miss — run pipeline on original blob.
-		return v.loadAndProcess(ctx, blob, params, load)
+		return v.loadAndProcess(ctx, blob, params, load, reports)
 	}
-	return v.loadAndProcess(ctx, memBlob, params, load)
+	return v.loadAndProcess(ctx, memBlob, params, load, reports)
 }
 
-// fullDimRegex matches a single dimension token: optionally a flip prefix -,
-// then f or full, optionally followed by a negative integer offset
-// e.g. f, f-20, full, full-20, -f, -full-20.
-var fullDimRegex = regexp.MustCompile(`^(-?)(?:full|f)(-\d+)?$`)
-
-// dimSegmentRegex matches a /‑separated WxH segment where either or both sides
-// may be an f/full‑token or a plain integer.
-var dimSegmentRegex = regexp.MustCompile(`^(-?(?:(?:full|f)(?:-\d+)?|\d*))x(-?(?:(?:full|f)(?:-\d+)?|\d*))$`)
-
-// resolveFullDim resolves a single dimension token against a parent pixel size.
-// Tokens of the form f or f-NNN (with optional leading - for flip)
-// resolve to parentDim - NNN. Any other token is returned unchanged.
-func resolveFullDim(token string, parentDim int) string {
-	m := fullDimRegex.FindStringSubmatch(token)
-	if m == nil {
-		return token
-	}
-	flip := m[1]
-	offset := 0
-	if m[2] != "" {
-		offset, _ = strconv.Atoi(m[2])
-	}
-	return flip + strconv.Itoa(parentDim+offset)
-}
-
-// resolveFullDimensions rewrites f‑tokens in the WxH dimension segment of an
-// imagor path, substituting the parent image's pixel dimensions before the path
-// is parsed. Only the first WxH dimension segment is considered — it always
-// appears before filters: in a valid imagor path. The function stops at the
-// first dimSegmentRegex match or at a filters: prefix, ensuring nested layer
-// paths inside filter arguments are not accidentally resolved at this level.
-func resolveFullDimensions(imagorPath string, parentW, parentH int) string {
-	start := 0
-	for i := 0; i <= len(imagorPath); i++ {
-		if i < len(imagorPath) && imagorPath[i] != '/' {
-			continue
-		}
-		seg := imagorPath[start:i]
-		// Stop before filters — nested layer paths inside filter arguments
-		// must be resolved at their own processing level, not here.
-		if strings.HasPrefix(seg, "filters:") {
-			return imagorPath
-		}
-		if m := dimSegmentRegex.FindStringSubmatch(seg); m != nil {
-			// Found the dimension segment. Resolve f-tokens if present.
-			newLeft := resolveFullDim(m[1], parentW)
-			newRight := resolveFullDim(m[2], parentH)
-			if newLeft != m[1] || newRight != m[2] {
-				return imagorPath[:start] + newLeft + "x" + newRight + imagorPath[i:]
-			}
-			return imagorPath
-		}
-		start = i + 1
-	}
-	return imagorPath
-}
+// fullDimRegex, dimSegmentRegex, ResolveFullDim and ResolveFullDimensions moved
+// to imagorpath so that every caller resolving a nested path — image() here and
+// a path: source in the server — resolves f-tokens the same way.
+var _ = imagorpath.ResolveFullDimensions
 
 // blendModeMap maps blend mode names to vips.BlendMode constants
 var blendModeMap = map[string]vips.BlendMode{

@@ -12,7 +12,7 @@ keywords:
 
 [![Test Status](https://github.com/cshum/imagorvideo/workflows/test/badge.svg)](https://github.com/cshum/imagorvideo/actions/workflows/test.yml)
 [![Codecov](https://img.shields.io/codecov/c/github/cshum/imagorvideo)](https://codecov.io/gh/cshum/imagorvideo)
-[![Docker Hub](https://img.shields.io/badge/docker-shumc/imagorvideo-blue.svg)](https://hub.docker.com/r/shumc/imagorvideo/)
+[![Docker Hub](https://img.shields.io/badge/docker-shumc/imagorvideo-blue.svg)](https://hub.docker.com/r/shumc/imagorvideo/) <iframe src="https://ghbtns.com/github-btn.html?user=cshum&repo=imagorvideo&type=star&count=true" frameBorder="0" scrolling="0" width="110" height="20" title="Star cshum/imagorvideo on GitHub"></iframe>
 
 imagorvideo brings video thumbnail capability to imagor through ffmpeg C bindings. It extracts video thumbnails by selecting the best frame using RMSE histogram analysis, then passes the frame through the full imagor pipeline for [cropping, resizing](./image-endpoint.md) and [filters](./filters.md).
 
@@ -34,9 +34,9 @@ docker run -p 8000:8000 shumc/imagorvideo -imagor-unsafe
 
 imagorvideo publishes three Docker image families:
 
-- `ghcr.io/cshum/imagorvideo`: default `ffmpeg` variant. This is the recommended baseline.
-- `ghcr.io/cshum/imagorvideo-mozjpeg`: `mozjpeg-ffmpeg` variant for deployments that want the MozJPEG-backed JPEG stack.
-- `ghcr.io/cshum/imagorvideo-magick`: `magick-ffmpeg` variant for deployments that need ImageMagick support in addition to ffmpeg.
+- `ghcr.io/cshum/imagorvideo`: default `ffmpeg` variant. This is the recommended baseline and matches the default `imagorvideo` Dockerfile.
+- `ghcr.io/cshum/imagorvideo-mozjpeg`: `mozjpeg-ffmpeg` variant. Use this when you want the MozJPEG-backed JPEG stack in addition to video thumbnail support.
+- `ghcr.io/cshum/imagorvideo-magick`: `magick-ffmpeg` variant. Use this when you need ImageMagick-backed formats or operations on top of the ffmpeg pipeline.
 
 All variants include video thumbnail extraction through ffmpeg. The difference is the imagor native stack used for the image-processing stage after frame extraction.
 
@@ -60,7 +60,7 @@ http://localhost:8000/unsafe/300x0/7x7/filters:frame(0.6):label(imagorvideo,10,-
   </tr>
 </table>
 
-imagorvideo streams a limited number of frames from the video, calculates the histogram of each frame, and selects the best one based on Root Mean Square Error (RMSE). This skips black frames that commonly occur at the start of videos. The selected frame is converted to RGB and forwarded to the imagor libvips processor.
+imagorvideo streams a limited number of frames from the video, calculates the histogram of each frame, and selects the best one based on Root Mean Square Error (RMSE). This skips black frames that commonly occur at the start of videos. The selected frame is converted to RGB and forwarded to the imagor libvips processor. See imagor [endpoint](./image-endpoint.md) and [filters](./filters.md) for the image operations supported.
 
 ## Filters
 
@@ -101,6 +101,22 @@ http://localhost:8000/unsafe/filters:seek(5m)/https://commondatastorage.googleap
 ### `max_frames(n)`
 
 Restricts the maximum number of frames sampled for best-frame selection. Smaller values produce faster processing at the cost of selection quality.
+
+### `gif(n)` / `gif(n,fps)`
+
+Creates an animated preview from `n` frames spread evenly over the video, played back at `fps` frames per second (default 5). Examples: `gif(10)`, `gif(20,4)`.
+
+### `gif(duration)` / `gif(duration,fps)`
+
+Creates an animated clip of consecutive frames sampled at `fps` starting at the `seek(n)` position, or the beginning of the video. Examples: `gif(3s)`, `seek(1m)/gif(2s,10)`.
+
+- The animation is output as GIF unless `format(webp)` is set. Formats without animation support such as `format(png)` output the first frame only.
+- `max_frames(n)` also caps the number of frames kept in the output animation. The server-wide limit is `-ffmpeg-max-animation-frames` (default 100).
+
+```
+http://localhost:8000/unsafe/300x0/filters:gif(12,4)/https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4
+http://localhost:8000/unsafe/300x0/filters:seek(1m30s):gif(2s,8)/https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4
+```
 
 ---
 
@@ -155,4 +171,6 @@ Configuration options specific to imagorvideo. See [Configuration](./configurati
 ```
   -ffmpeg-fallback-image string
         FFmpeg fallback image on processing error. Supports image path enabled by loaders or storages
+  -ffmpeg-max-animation-frames int
+        FFmpeg maximum number of frames decoded by the gif filter (default 100)
 ```

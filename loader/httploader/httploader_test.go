@@ -308,6 +308,16 @@ func TestBlockNetworks(t *testing.T) {
 		opt  Option
 	}{
 		{
+			name: "loopback unspecified ipv4",
+			addr: "0.0.0.0:8080",
+			opt:  WithBlockLoopbackNetworks(true),
+		},
+		{
+			name: "loopback unspecified ipv6",
+			addr: "[::]:8080",
+			opt:  WithBlockLoopbackNetworks(true),
+		},
+		{
 			name: "link local",
 			addr: "169.254.5.8:2000",
 			opt:  WithBlockLinkLocalNetworks(true),
@@ -316,6 +326,26 @@ func TestBlockNetworks(t *testing.T) {
 			name: "private",
 			addr: "10.0.4.3:1000",
 			opt:  WithBlockPrivateNetworks(true),
+		},
+		{
+			name: "private nat64",
+			addr: "[64:ff9b::a00:403]:1000",
+			opt:  WithBlockPrivateNetworks(true),
+		},
+		{
+			name: "private 6to4",
+			addr: "[2002:a00:403::]:1000",
+			opt:  WithBlockPrivateNetworks(true),
+		},
+		{
+			name: "loopback teredo",
+			addr: "[2001:0:4136:e378:8000:63bf:80ff:fffe]:1000",
+			opt:  WithBlockLoopbackNetworks(true),
+		},
+		{
+			name: "link local nat64",
+			addr: "[64:ff9b::a9fe:101]:1000",
+			opt:  WithBlockLinkLocalNetworks(true),
 		},
 	} {
 		t.Run(v.name, func(t *testing.T) {
@@ -326,6 +356,15 @@ func TestBlockNetworks(t *testing.T) {
 			assert.ErrorContains(t, err, "unauthorized request")
 		})
 	}
+
+	t.Run("unspecified allowed when loopback blocking disabled", func(t *testing.T) {
+		loader := New()
+		err := loader.DialControl("tcp", "0.0.0.0:8080", nil)
+		assert.NoError(t, err)
+
+		err = loader.DialControl("tcp", "[::]:8080", nil)
+		assert.NoError(t, err)
+	})
 }
 
 func TestWithDefaultScheme(t *testing.T) {

@@ -2,6 +2,7 @@ package imagor
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -9,7 +10,7 @@ import (
 )
 
 func TestDefer(t *testing.T) {
-	var called int
+	var called atomic.Int32
 	ctx, cancel := context.WithCancel(context.Background())
 	assert.Panics(t, func() {
 		contextDefer(ctx, func() {
@@ -18,18 +19,18 @@ func TestDefer(t *testing.T) {
 	})
 	ctx = withContext(ctx)
 	contextDefer(ctx, func() {
-		called++
+		called.Add(1)
 	})
 	contextDefer(ctx, func() {
-		called++
+		called.Add(1)
 	})
 	cancel()
-	assert.Equal(t, 0, called, "should call after signal")
+	assert.EqualValues(t, 0, called.Load(), "should call after signal")
 	time.Sleep(time.Millisecond * 10)
 	contextDefer(ctx, func() {
-		called++
+		called.Add(1)
 	})
-	assert.Equal(t, 2, called, "should count all defers before cancel")
+	assert.EqualValues(t, 2, called.Load(), "should count all defers before cancel")
 }
 
 func TestDetachContext(t *testing.T) {
@@ -49,4 +50,19 @@ func TestDetachContext(t *testing.T) {
 	assert.True(t, isDetached(ctx))
 	time.Sleep(time.Millisecond * 10)
 	assert.Equal(t, ctx.Err(), context.DeadlineExceeded)
+}
+
+func TestSourceImageKeyContext(t *testing.T) {
+	ctx := context.Background()
+	assert.Equal(t, "", SourceImageKeyFromContext(ctx))
+
+	unchanged := ContextWithSourceImageKey(ctx, "")
+	assert.True(t, ctx == unchanged)
+	assert.Equal(t, "", SourceImageKeyFromContext(unchanged))
+
+	updated := ContextWithSourceImageKey(ctx, "/bucket-a/images/photo.jpg")
+	assert.Equal(t, "/bucket-a/images/photo.jpg", SourceImageKeyFromContext(updated))
+	assert.Equal(t, "", SourceImageKeyFromContext(ctx))
+	assert.Equal(t, "/bucket-a/images/photo.jpg", updated.Value(sourceImageKeyContextKey))
+	assert.Nil(t, updated.Value(contextKey{99}))
 }

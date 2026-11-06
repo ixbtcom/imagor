@@ -11,13 +11,13 @@ import (
 	"strings"
 
 	"github.com/bbrks/go-blurhash"
-	"github.com/cshum/vipsgen/vips"
+	"github.com/cshum/vipsgen/v2/vips"
 	"go.n16f.net/thumbhash"
 
 	"github.com/cshum/imagor"
 )
 
-func roundCorner(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+func roundCorner(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	var rx, ry int
 	var c []float64
 	if len(args) == 0 {
@@ -36,6 +36,7 @@ func roundCorner(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args .
 	if len(args) > 1 {
 		ry, _ = strconv.Atoi(args[1])
 	}
+	processed = true
 
 	var rounded *vips.Image
 	var w = img.Width()
@@ -66,13 +67,13 @@ func roundCorner(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args .
 			return
 		}
 	}
-	return nil
+	return
 }
 
-func (v *Processor) padding(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) error {
+func (v *Processor) padding(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	ln := len(args)
 	if ln < 2 {
-		return nil
+		return
 	}
 	var (
 		c       = args[0]
@@ -89,10 +90,10 @@ func (v *Processor) padding(ctx context.Context, img *vips.Image, _ imagor.LoadF
 		right, _ = strconv.Atoi(args[3])
 		bottom, _ = strconv.Atoi(args[4])
 	}
-	return v.fill(ctx, img, img.Width(), img.PageHeight(), left, top, right, bottom, c)
+	return true, v.fill(ctx, img, img.Width(), img.PageHeight(), left, top, right, bottom, c)
 }
 
-func backgroundColor(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+func backgroundColor(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	if len(args) == 0 {
 		return
 	}
@@ -100,28 +101,108 @@ func backgroundColor(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args
 		return
 	}
 	c := getColor(img, args[0])
-	return img.Flatten(&vips.FlattenOptions{
+	return true, img.Flatten(&vips.FlattenOptions{
 		Background: c,
 	})
 }
 
-func rotate(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+// rotateMultiPageImage applies an arbitrary-angle rotation to a (possibly
+// multi-page / animated) image.  Orthogonal angles (90, 180, 270) are
+// delegated to the native RotMultiPage for optimal performance.  All other
+// angles use vips_rotate on each page individually, matching the multi-page
+// processing pattern established by pixelateMultiPageImage.
+func rotateMultiPageImage(img *vips.Image, angle float64) error {
+	// Orthogonal angles — use the native multi-page rotate (fast path).
+	if angle == float64(int(angle)) && int(angle)%90 == 0 {
+		return img.RotMultiPage(getAngle(int(angle)))
+	}
+	// Ensure alpha channel so rotated background is transparent.
+	if !img.HasAlpha() {
+		if err := img.Addalpha(); err != nil {
+			return err
+		}
+	}
+	rotateOpts := &vips.RotateOptions{
+		Background: []float64{0, 0, 0, 0},
+	}
+	pageHeight := img.PageHeight()
+	if pageHeight <= 0 {
+		return img.Rotate(angle, rotateOpts)
+	}
+	pages := img.Height() / pageHeight
+	if pages <= 1 {
+		return img.Rotate(angle, rotateOpts)
+	}
+	// Multi-page: process each page individually.
+	src, err := img.Copy(nil)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	if err := img.ExtractArea(0, 0, src.Width(), pageHeight); err != nil {
+		return err
+	}
+	if err := img.Rotate(angle, rotateOpts); err != nil {
+		return err
+	}
+	for page := 1; page < pages; page++ {
+		frame, err := src.Copy(nil)
+		if err != nil {
+			return err
+		}
+		if err := frame.ExtractArea(0, page*pageHeight, src.Width(), pageHeight); err != nil {
+			frame.Close()
+			return err
+		}
+		if err := frame.Rotate(angle, rotateOpts); err != nil {
+			frame.Close()
+			return err
+		}
+		if err := img.Join(frame, vips.DirectionVertical, nil); err != nil {
+			frame.Close()
+			return err
+		}
+		frame.Close()
+	}
+	if err := img.SetPageHeight(img.Height() / pages); err != nil {
+		return err
+	}
+	return img.SetPages(pages)
+}
+
+func rotate(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	if len(args) == 0 {
 		return
 	}
-	if angle, _ := strconv.Atoi(args[0]); angle > 0 {
-		switch angle {
-		case 90, 270:
-			setRotate90(ctx)
-		}
-		if err = img.RotMultiPage(getAngle(angle)); err != nil {
-			return err
-		}
+	angle, _ := strconv.ParseFloat(args[0], 64)
+	if angle == 0 {
+		return
+	}
+	// Normalize to 0-360 range so negative angles (anti-clockwise) and
+	// values exceeding 360 are handled correctly by both the orthogonal
+	// RotMultiPage path and the arbitrary-angle vips_rotate path.
+	angle = math.Mod(angle, 360)
+	if angle < 0 {
+		angle += 360
+	}
+	processed = true
+	switch int(angle) {
+	case 90, 270:
+		setRotate90(ctx)
+	}
+	if int(angle)%90 != 0 {
+		setRotateArbitrary(ctx)
+	}
+	if err = rotateMultiPageImage(img, angle); err != nil {
+		return
+	}
+	if err = rotateGainmap(img, angle); err != nil {
+		return
 	}
 	return
 }
 
-func proportion(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+func proportion(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	if len(args) == 0 {
 		return
 	}
@@ -140,26 +221,33 @@ func proportion(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...s
 	if width <= 0 || height <= 0 {
 		return // op ops
 	}
-	return img.ThumbnailImage(width, &vips.ThumbnailImageOptions{
+	if err = attachGainmap(img); err != nil {
+		return
+	}
+	return true, img.ThumbnailImage(width, &vips.ThumbnailImageOptions{
 		Height: height,
 		Crop:   vips.InterestingNone,
 	})
 }
 
-func grayscale(_ context.Context, img *vips.Image, _ imagor.LoadFunc, _ ...string) (err error) {
-	return img.Colourspace(vips.InterpretationBW, nil)
+func grayscale(_ context.Context, img *vips.Image, _ imagor.LoadFunc, _ ...string) (processed bool, err error) {
+	return true, img.Colourspace(vips.InterpretationBW, nil)
 }
 
-func brightness(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+func invert(_ context.Context, img *vips.Image, _ imagor.LoadFunc, _ ...string) (processed bool, err error) {
+	return true, linearRGB(img, []float64{-1, -1, -1}, []float64{255, 255, 255})
+}
+
+func brightness(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	if len(args) == 0 {
 		return
 	}
 	b, _ := strconv.ParseFloat(args[0], 64)
 	b = b * 255 / 100
-	return linearRGB(img, []float64{1, 1, 1}, []float64{b, b, b})
+	return true, linearRGB(img, []float64{1, 1, 1}, []float64{b, b, b})
 }
 
-func contrast(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+func contrast(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	if len(args) == 0 {
 		return
 	}
@@ -168,27 +256,27 @@ func contrast(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...str
 	a = math.Min(math.Max(a, -255), 255)
 	a = (259 * (a + 255)) / (255 * (259 - a))
 	b := 128 - a*128
-	return linearRGB(img, []float64{a, a, a}, []float64{b, b, b})
+	return true, linearRGB(img, []float64{a, a, a}, []float64{b, b, b})
 }
 
-func hue(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+func hue(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	if len(args) == 0 {
 		return
 	}
 	h, _ := strconv.ParseFloat(args[0], 64)
-	return img.Modulate(1, 1, h)
+	return true, img.Modulate(1, 1, h)
 }
 
-func saturation(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+func saturation(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	if len(args) == 0 {
 		return
 	}
 	s, _ := strconv.ParseFloat(args[0], 64)
 	s = 1 + s/100
-	return img.Modulate(1, s, 0)
+	return true, img.Modulate(1, s, 0)
 }
 
-func rgb(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+func rgb(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	if len(args) != 3 {
 		return
 	}
@@ -198,10 +286,10 @@ func rgb(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) 
 	r = r * 255 / 100
 	g = g * 255 / 100
 	b = b * 255 / 100
-	return linearRGB(img, []float64{1, 1, 1}, []float64{r, g, b})
+	return true, linearRGB(img, []float64{1, 1, 1}, []float64{r, g, b})
 }
 
-func modulate(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+func modulate(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	if len(args) != 3 {
 		return
 	}
@@ -210,10 +298,10 @@ func modulate(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...str
 	h, _ := strconv.ParseFloat(args[2], 64)
 	b = 1 + b/100
 	s = 1 + s/100
-	return img.Modulate(b, s, h)
+	return true, img.Modulate(b, s, h)
 }
 
-func blur(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+func blur(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	if isAnimated(img) {
 		// skip animation support
 		return
@@ -229,7 +317,7 @@ func blur(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...strin
 		sigma /= 2
 	}
 	if sigma > 0 {
-		return img.Gaussblur(sigma, nil)
+		return true, img.Gaussblur(sigma, nil)
 	}
 	return
 }
@@ -255,20 +343,62 @@ func pixelateImage(img *vips.Image, blockSize int) error {
 	return img.Zoom(blockSize, blockSize)
 }
 
-func pixelate(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
-	if isAnimated(img) {
-		return
+func pixelateMultiPageImage(img *vips.Image, blockSize int) error {
+	pageHeight := img.PageHeight()
+	if pageHeight <= 0 {
+		return pixelateImage(img, blockSize)
 	}
+	pages := img.Height() / pageHeight
+	if pages <= 1 {
+		return pixelateImage(img, blockSize)
+	}
+	src, err := img.Copy(nil)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	if err := img.ExtractArea(0, 0, src.Width(), pageHeight); err != nil {
+		return err
+	}
+	if err := pixelateImage(img, blockSize); err != nil {
+		return err
+	}
+	for page := 1; page < pages; page++ {
+		frame, err := src.Copy(nil)
+		if err != nil {
+			return err
+		}
+		if err := frame.ExtractArea(0, page*pageHeight, src.Width(), pageHeight); err != nil {
+			frame.Close()
+			return err
+		}
+		if err := pixelateImage(frame, blockSize); err != nil {
+			frame.Close()
+			return err
+		}
+		if err := img.Join(frame, vips.DirectionVertical, nil); err != nil {
+			frame.Close()
+			return err
+		}
+		frame.Close()
+	}
+	if err := img.SetPageHeight(img.Height() / pages); err != nil {
+		return err
+	}
+	return img.SetPages(pages)
+}
+
+func pixelate(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	blockSize := 10
 	if len(args) > 0 {
 		if b, e := strconv.Atoi(args[0]); e == nil && b > 0 {
 			blockSize = b
 		}
 	}
-	return pixelateImage(img, blockSize)
+	return true, pixelateMultiPageImage(img, blockSize)
 }
 
-func sharpen(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+func sharpen(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	if isAnimated(img) {
 		// skip animation support
 		return
@@ -284,42 +414,43 @@ func sharpen(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...st
 	}
 	sigma = 1 + sigma*2
 	if sigma > 0 {
-		return img.Sharpen(&vips.SharpenOptions{
+		return true, img.Sharpen(&vips.SharpenOptions{
 			Sigma: sigma,
-			X1:    1,
-			M2:    2,
+			X1:    vips.Ptr(1.0),
+			M2:    vips.Ptr(2.0),
 		})
 	}
 	return
 }
 
-func stripIcc(_ context.Context, img *vips.Image, _ imagor.LoadFunc, _ ...string) (err error) {
+func stripIcc(_ context.Context, img *vips.Image, _ imagor.LoadFunc, _ ...string) (processed bool, err error) {
 	normalizeSrgb(img)
-	return img.RemoveICCProfile()
+	return true, img.RemoveICCProfile()
 }
 
-func toColorspace(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+func toColorspace(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	profile := "srgb"
 	if len(args) > 0 && args[0] != "" {
 		profile = strings.ToLower(args[0])
 	}
 	if !img.HasICCProfile() {
-		return nil
+		return
 	}
-	opts := vips.DefaultIccTransformOptions()
-	opts.Embedded = true
-	opts.Intent = vips.IntentPerceptual
+	opts := &vips.IccTransformOptions{
+		Embedded: true,
+		Intent:   vips.Ptr(vips.IntentPerceptual),
+	}
 	if img.Interpretation() == vips.InterpretationRgb16 {
 		opts.Depth = 16
 	}
-	return img.IccTransform(profile, opts)
+	return true, img.IccTransform(profile, opts)
 }
 
-func stripExif(_ context.Context, img *vips.Image, _ imagor.LoadFunc, _ ...string) (err error) {
-	return img.RemoveExif()
+func stripExif(_ context.Context, img *vips.Image, _ imagor.LoadFunc, _ ...string) (processed bool, err error) {
+	return true, img.RemoveExif()
 }
 
-func trim(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) error {
+func trim(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	var (
 		ln        = len(args)
 		pos       string
@@ -331,15 +462,18 @@ func trim(ctx context.Context, img *vips.Image, _ imagor.LoadFunc, args ...strin
 	if ln > 1 {
 		pos = args[1]
 	}
-	if l, t, w, h, err := findTrim(ctx, img, pos, tolerance); err == nil {
-		return img.ExtractAreaMultiPage(l, t, w, h)
+	if l, t, w, h, trimErr := findTrim(ctx, img, pos, tolerance); trimErr == nil {
+		if err = cropGainmap(img, l, t, w, h); err != nil {
+			return
+		}
+		return true, img.ExtractAreaMultiPage(l, t, w, h)
 	}
-	return nil
+	return
 }
 
-func crop(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) error {
+func crop(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	if len(args) < 4 {
-		return nil
+		return
 	}
 
 	// Parse arguments
@@ -375,10 +509,13 @@ func crop(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string)
 
 	// Skip if invalid crop area
 	if width <= 0 || height <= 0 {
-		return nil
+		return
 	}
 
-	return img.ExtractAreaMultiPage(int(left), int(top), int(width), int(height))
+	if err = cropGainmap(img, int(left), int(top), int(width), int(height)); err != nil {
+		return
+	}
+	return true, img.ExtractAreaMultiPage(int(left), int(top), int(width), int(height))
 }
 
 // avgColorRGB computes the average RGB color of img by:
@@ -449,7 +586,7 @@ func blurHash(_ context.Context, img *vips.Image, xComponents, yComponents int) 
 	defer thumb.Close()
 	normalizeSrgb(thumb)
 	if thumb.HasAlpha() {
-		if err := thumb.Flatten(vips.DefaultFlattenOptions()); err != nil {
+		if err := thumb.Flatten(nil); err != nil {
 			return "", err
 		}
 	}

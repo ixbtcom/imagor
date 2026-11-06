@@ -65,6 +65,20 @@ AWS_RESULT_STORAGE_SESSION_TOKEN
 S3_RESULT_STORAGE_ENDPOINT
 ```
 
+## Анонимный S3 Loader для публичных источников
+
+По умолчанию `S3_LOADER_ANONYMOUS=0` (CLI: `-s3-loader-anonymous=false`): S3 Loader использует глобальные AWS credentials либо отдельные `AWS_LOADER_*`.
+
+Чтобы читать публичные объекты без подписи AWS и без заголовков `Authorization` и `X-Amz-Security-Token`, включите:
+
+```dotenv
+S3_LOADER_ANONYMOUS=1
+```
+
+CLI-эквивалент: `-s3-loader-anonymous`. Флаг действует и на обычный `S3_LOADER_BUCKET`, и на `S3_LOADER_BUCKET_ROUTER_CONFIG`, включая динамические бакеты из `routing_pattern`. Он имеет приоритет над глобальными credentials и явными `AWS_LOADER_*`, но не меняет credentials для Storage и Result Storage. Поэтому чтение публичных источников может оставаться анонимным, а запись оригиналов и результатов — подписанной.
+
+**Исключение для bucket routing:** пара `access_key_id` и `secret_access_key`, явно заданная у бакета в YAML (в правиле, `default_bucket` или `fallback_buckets`), переопределяет анонимные credentials для этого бакета; его запросы будут подписаны. Для полностью анонимного маршрутизатора не задавайте credentials бакетов в YAML.
+
 ## Base Directory And Path Prefix
 
 These settings control different parts of the lookup flow:
@@ -189,9 +203,9 @@ S3_STORAGE_BUCKET=*         # enable S3 storage with dynamic bucket from path
 S3_RESULT_STORAGE_BUCKET=*  # enable S3 result storage with dynamic bucket from path
 ```
 
-A request for `/mysite-test/images/photo.jpg` will load `images/photo.jpg` from the `mysite-test` bucket. A request for `/mysite-prod/assets/logo.png` will load `assets/logo.png` from the `mysite-prod` bucket. The first path segment is always used as the bucket name and the remainder as the object key.
+A request for `/mysite-test/images/photo.jpg` will load `images/photo.jpg` from the `mysite-test` bucket. A request for `/mysite-prod/assets/logo.png` will load `assets/logo.png` from the `mysite-prod` bucket. The first path segment of the source image path is used as the bucket name and the remainder as the object key.
 
-This works identically for loader, storage, and result storage — all three use the same `S3Storage` implementation. This allows a single imagor instance to serve images from any bucket in the same AWS account without any additional configuration.
+This works identically for loader, storage, and result storage — all three use the same `S3Storage` implementation. For result storage, imagor derives the wildcard bucket from the original source image path, even when the stored result key includes processing parameters. This allows a single imagor instance to serve images from any bucket in the same AWS account without any additional configuration.
 
 ## S3 Loader Bucket Routing
 

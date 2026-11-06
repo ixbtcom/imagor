@@ -51,7 +51,10 @@ const config: Config = {
         blog: false,
         sitemap: {
           ignorePatterns: ["/search", "/404.html"],
-          createSitemapItems: async ({ defaultCreateSitemapItems, ...rest }) => {
+          createSitemapItems: async ({
+            defaultCreateSitemapItems,
+            ...rest
+          }) => {
             const items = await defaultCreateSitemapItems(rest);
 
             return items.filter((item) => !item.url.includes("/category/"));
@@ -97,10 +100,6 @@ const config: Config = {
           position: "left",
           items: [
             {
-              label: "Imagor Cloud",
-              href: "https://imagor.net",
-            },
-            {
               label: "imagor",
               to: "/",
             },
@@ -111,6 +110,14 @@ const config: Config = {
             {
               label: "imagorface",
               to: "/imagorface",
+            },
+            {
+              label: "Imagor MCP",
+              to: "/mcp",
+            },
+            {
+              label: "Imagor Studio",
+              href: "https://studio.imagor.net",
             },
           ],
         },
@@ -124,10 +131,10 @@ const config: Config = {
           position: "right",
         },
         {
-          href: "https://imagor.net",
-          label: "Imagor Cloud",
+          label: "Consulting",
+          to: "/consulting",
           position: "right",
-          className: "navbar-buy-button",
+          className: "navbar-consulting-button",
         },
       ],
     },
@@ -159,10 +166,6 @@ const config: Config = {
           title: "Ecosystem",
           items: [
             {
-              label: "Imagor Cloud",
-              href: "https://imagor.net",
-            },
-            {
               label: "imagor",
               to: "/",
             },
@@ -174,6 +177,14 @@ const config: Config = {
               label: "imagorface",
               to: "/imagorface",
             },
+            {
+              label: "Imagor MCP",
+              to: "/mcp",
+            },
+            {
+              label: "Imagor Studio",
+              href: "https://studio.imagor.net",
+            },
           ],
         },
         {
@@ -184,22 +195,33 @@ const config: Config = {
               href: "https://github.com/cshum/imagor",
             },
             {
+              label: "Sponsor",
+              href: "https://github.com/sponsors/cshum",
+            },
+            {
               label: "Docker Hub",
               href: "https://hub.docker.com/r/shumc/imagor",
             },
             {
-              label: "Benchmarks",
-              to: "/benchmarks",
+              label: "Consulting",
+              to: "/consulting",
             },
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} imagor.`,
+      copyright: `Copyright © ${new Date().getFullYear()} <a href="https://cshum.com">Adrian C. Shum</a>`,
     },
     prism: {
       theme: prismThemes.github,
       darkTheme: prismThemes.dracula,
-      additionalLanguages: ["bash", "yaml", "docker", "go", "javascript", "php"],
+      additionalLanguages: [
+        "bash",
+        "yaml",
+        "docker",
+        "go",
+        "javascript",
+        "php",
+      ],
     },
   } satisfies Preset.ThemeConfig,
 };

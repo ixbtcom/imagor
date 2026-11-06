@@ -107,6 +107,21 @@ func (s *S3Storage) resolve(image string) (bucket, key string, ok bool) {
 	return s.Bucket, key, ok
 }
 
+func (s *S3Storage) resolveRequest(ctx context.Context, image string) (bucket, key string, ok bool) {
+	if source := imagor.SourceImageKeyFromContext(ctx); s.Bucket == "*" && source != "" {
+		bucket, _, ok = s.resolve(source)
+		if !ok {
+			return "", "", false
+		}
+		key, ok = s.Path(image)
+		if !ok {
+			return "", "", false
+		}
+		return bucket, key, true
+	}
+	return s.resolve(image)
+}
+
 // pathFromNormalized computes the storage key from an already-slash-prefixed path,
 // applying PathPrefix and BaseDir transformations.
 func (s *S3Storage) pathFromNormalized(image string) (string, bool) {
@@ -137,7 +152,7 @@ func (s *S3Storage) Path(image string) (string, bool) {
 // Get implements imagor.Storage interface
 func (s *S3Storage) Get(r *http.Request, image string) (*imagor.Blob, error) {
 	ctx := r.Context()
-	bucket, image, ok := s.resolve(image)
+	bucket, image, ok := s.resolveRequest(ctx, image)
 	if !ok {
 		return nil, imagor.ErrInvalid
 	}
@@ -169,7 +184,7 @@ func (s *S3Storage) Get(r *http.Request, image string) (*imagor.Blob, error) {
 			}
 		})
 		if s.Expiration > 0 && out.LastModified != nil {
-			if time.Now().Sub(*out.LastModified) > s.Expiration {
+			if time.Since(*out.LastModified) > s.Expiration {
 				return nil, 0, imagor.ErrExpired
 			}
 		}
@@ -184,7 +199,7 @@ func (s *S3Storage) Get(r *http.Request, image string) (*imagor.Blob, error) {
 
 // Put implements imagor.Storage interface
 func (s *S3Storage) Put(ctx context.Context, image string, blob *imagor.Blob) error {
-	bucket, image, ok := s.resolve(image)
+	bucket, image, ok := s.resolveRequest(ctx, image)
 	if !ok {
 		return imagor.ErrInvalid
 	}
@@ -201,6 +216,16 @@ func (s *S3Storage) Put(ctx context.Context, image string, blob *imagor.Blob) er
 	defer func() {
 		_ = reader.Close()
 	}()
+	if size <= 0 {
+		// Determine the real length through the existing file-backed seeker.
+		// Do not duplicate chunked originals into an unbounded memory buffer.
+		if size, err = reader.Seek(0, io.SeekEnd); err != nil {
+			return err
+		}
+		if _, err = reader.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+	}
 
 	input := &s3.PutObjectInput{
 		Body:          reader,
@@ -222,7 +247,7 @@ func (s *S3Storage) Put(ctx context.Context, image string, blob *imagor.Blob) er
 
 // Delete implements imagor.Storage interface
 func (s *S3Storage) Delete(ctx context.Context, image string) error {
-	bucket, image, ok := s.resolve(image)
+	bucket, image, ok := s.resolveRequest(ctx, image)
 	if !ok {
 		return imagor.ErrInvalid
 	}
@@ -235,7 +260,7 @@ func (s *S3Storage) Delete(ctx context.Context, image string) error {
 
 // Stat implements imagor.Storage interface
 func (s *S3Storage) Stat(ctx context.Context, image string) (stat *imagor.Stat, err error) {
-	bucket, image, ok := s.resolve(image)
+	bucket, image, ok := s.resolveRequest(ctx, image)
 	if !ok {
 		return nil, imagor.ErrInvalid
 	}

@@ -2,6 +2,7 @@ package vipsprocessor
 
 import (
 	"context"
+	"errors"
 	"math"
 	"strconv"
 	"strings"
@@ -9,9 +10,82 @@ import (
 
 	"github.com/cshum/imagor"
 	"github.com/cshum/imagor/imagorpath"
-	"github.com/cshum/vipsgen/vips"
+	"github.com/cshum/imagor/svg"
+	"github.com/cshum/vipsgen/v2/vips"
 	"go.uber.org/zap"
 )
+
+// FilterReport records what the processor did with one filter in the URL. A
+// filter can repeat, so there is one entry per occurrence, in URL order. A name
+// this processor did not handle is omitted, as a later processor may.
+type FilterReport struct {
+	Name string `json:"name"`
+	// Processed is false when the filter was recognised but left the image
+	// unchanged, as blur() does with no sigma.
+	Processed bool `json:"processed"`
+	// Filters reports what the filters in a path this filter loaded did, for
+	// image(), which parses its argument as an image and processes it in its own
+	// right. They are reported under it rather than beside it because they ran
+	// on other pixels.
+	Filters []FilterReport `json:"filters,omitempty"`
+}
+
+// filterReports carries what each filter in a URL did. Switches that run before
+// the dispatch loop record what they recognised here, for the loop to consult.
+type filterReports struct {
+	// Absent means no switch recognised the name; false means one recognised it
+	// without applying it.
+	recognised map[string]bool
+	handled    []FilterReport
+}
+
+func newFilterReports() *filterReports {
+	return &filterReports{recognised: map[string]bool{}}
+}
+
+// record notes a filter applied outside the dispatch loop. A name matched at
+// more than one site counts as processed if any applied.
+func (r *filterReports) record(name string, processed bool) {
+	r.recognised[name] = r.recognised[name] || processed
+}
+
+func (r *filterReports) accepted(name string) (recognised, processed bool) {
+	processed, recognised = r.recognised[name]
+	return
+}
+
+// add notes a filter the dispatch loop reached. nested carries the report for a
+// path the filter loaded, when it loaded one.
+func (r *filterReports) add(name string, processed bool, nested *filterReports) {
+	e := FilterReport{Name: name, Processed: processed}
+	if nested != nil {
+		e.Filters = nested.report()
+	}
+	r.handled = append(r.handled, e)
+}
+
+func (r *filterReports) report() []FilterReport {
+	if r.handled == nil {
+		// An empty list is a result. A client needs to tell a release that
+		// reports outcomes from one that predates the field, and omitting it
+		// makes those two look the same.
+		return []FilterReport{}
+	}
+	return r.handled
+}
+
+// filterEventName is the debug log event for an outcome. An unrecognised name is
+// logged as unhandled, not unknown: a later processor may handle it.
+func filterEventName(recognised, processed bool) string {
+	switch {
+	case !recognised:
+		return "filter-unhandled"
+	case processed:
+		return "filter"
+	default:
+		return "filter-declined"
+	}
+}
 
 var imageTypeMap = map[string]vips.ImageType{
 	"gif":  vips.ImageTypeGif,
@@ -48,26 +122,19 @@ type exportParams struct {
 	maxBytes          int
 }
 
-type processFunc func(
-	ctx context.Context, blob *imagor.Blob, p imagorpath.Params, load imagor.LoadFunc,
-) (*imagor.Blob, error)
-
 // Process implements imagor.Processor interface
 func (v *Processor) Process(
 	ctx context.Context, blob *imagor.Blob, p imagorpath.Params, load imagor.LoadFunc,
 ) (result *imagor.Blob, retErr error) {
-	ctx = withContext(ctx)
+	ctx, srcReads := withSourceReadTracker(withContext(ctx))
 	defer contextDone(ctx)
 	defer func() {
+		retErr = WrapErr(newSourceDependencyError(retErr, srcReads.err()))
 		if retErr != nil {
-			retErr = WrapErr(newSourceDependencyError(retErr, contextSourceError(ctx)))
+			result = nil
 		}
 	}()
-	run := v.process
-	if v.processFunc != nil {
-		run = v.processFunc
-	}
-	return run(ctx, blob, p, load)
+	return v.process(ctx, blob, p, load)
 }
 
 func (v *Processor) process(
@@ -77,7 +144,8 @@ func (v *Processor) process(
 	// Use image cache for preview() requests: known-size, within cache max dims, no bypass conditions.
 	// preview() opts in to base image caching for interactive editing workflows.
 	// Skip for crop/focal/page/dpi: cache stores a downscaled single-page copy at default DPI.
-	if p.Image != "" && imagorpath.HasFilter(p, "preview") {
+	// Skip for lang(): the cache is keyed on the source, and the rewritten source differs.
+	if p.Image != "" && v.hasEnabledFilter(p, "preview") && !v.hasEnabledFilter(p, langFilterName) {
 		if _, isColor := parseColorImage(p.Image); !isColor {
 			sizeKnown := p.Width > 0 && p.Height > 0
 			if sizeKnown && p.Width <= v.CacheMaxWidth && p.Height <= v.CacheMaxHeight &&
@@ -90,28 +158,55 @@ func (v *Processor) process(
 		}
 	}
 
-	img, err := v.loadAndProcess(ctx, blob, p, load)
+	// The export and metadata switches share outcomes with the dispatch loop.
+	params, reports := v.extractExportParams(p)
+
+	// lang() decides what the renderer draws, so the source is rewritten before it
+	// is loaded. SVG sources only.
+	if blob != nil && blob.BlobType() == imagor.BlobTypeSVG && v.hasEnabledFilter(p, langFilterName) {
+		if tags, ok := langTags(p); ok {
+			switch rewritten, langErr := selectLanguage(blob, tags); {
+			case langErr == nil:
+				blob = rewritten
+				reports.record(langFilterName, true)
+			case errors.Is(langErr, svg.ErrInvalidLanguageTag):
+				v.Logger.Warn(langFilterName, zap.String("error", langErr.Error()))
+				return nil, imagor.ErrInvalid
+			default:
+				// Not the caller's doing: render the document as it is, as without
+				// the filter.
+				v.Logger.Warn(langFilterName+"-ignored", zap.String("error", langErr.Error()))
+			}
+		}
+	}
+
+	// Decode constraints also report into the map for the dispatch loop.
+	img, err := v.loadAndProcess(ctx, blob, p, load, reports)
 	if err != nil {
 		return nil, err
 	}
 	defer img.Close()
 
-	params := v.extractExportParams(p, blob, img)
+	v.applyDefaultExportFormat(params, blob, img)
 	v.applyAutoFormatFallback(img, params)
 
 	// Handle metadata response
 	if p.Meta {
-		stripExif := imagorpath.HasFilter(p, "strip_exif")
+		stripExif := v.hasEnabledFilter(p, "strip_exif")
 		var metaRegions []imagor.DetectorRegion
 		// Only run detection when the URL semantically requests it — smart crop, draw_detections() or redact() filter.
 		needsDetection := p.Smart ||
-			imagorpath.HasFilter(p, "draw_detections") ||
-			imagorpath.HasFilter(p, "redact")
+			v.hasEnabledFilter(p, "draw_detections") ||
+			v.hasEnabledFilter(p, "redact")
 		if len(v.Detectors) > 0 && needsDetection {
 			metaRegions = v.detectRegions(ctx, img, p.Image)
 		}
 		m := metadata(img, params.format, stripExif, metaRegions)
+		m.Filters = reports.report()
 		for _, f := range p.Filters {
+			if v.disableFilters[f.Name] {
+				continue
+			}
 			switch f.Name {
 			case "avgcolor":
 				if f.Args != "" {
@@ -155,7 +250,7 @@ func (v *Processor) process(
 	// or as part of strip_metadata. This ensures proper colour conversion to
 	// sRGB before the profile is removed, matching strip_icc.
 	if params.stripColorProfile || params.stripMetadata {
-		if err := stripIcc(ctx, img, load); err != nil {
+		if _, err := stripIcc(ctx, img, load); err != nil {
 			return nil, WrapErr(err)
 		}
 	}
@@ -202,8 +297,19 @@ func (v *Processor) process(
 	}
 }
 
-// extractExportParams extracts export-related parameters from filters
-func (v *Processor) extractExportParams(p imagorpath.Params, blob *imagor.Blob, img *vips.Image) *exportParams {
+// hasEnabledFilter reports whether the URL asks for a filter and that filter is
+// not disabled. Where a filter is dispatched, disableFilters is checked at the
+// dispatch; a gate that only asks whether the URL mentions a filter has to apply
+// the same policy, or disabling a filter leaves its side effects behind.
+func (v *Processor) hasEnabledFilter(p imagorpath.Params, name string) bool {
+	return !v.disableFilters[name] && imagorpath.HasFilter(p, name)
+}
+
+// extractExportParams reads the export settings a URL's filters ask for, and
+// reports which were recognised and accepted. It needs no image, so Process
+// calls it before the dispatch loop, which has to know what they did.
+func (v *Processor) extractExportParams(p imagorpath.Params) (*exportParams, *filterReports) {
+	reports := newFilterReports()
 	var (
 		quality           int
 		bitdepth          int
@@ -223,42 +329,57 @@ func (v *Processor) extractExportParams(p imagorpath.Params, blob *imagor.Blob, 
 		}
 		switch f.Name {
 		case "format":
-			if imageType, ok := imageTypeMap[f.Args]; ok {
+			imageType, ok := imageTypeMap[f.Args]
+			if ok {
 				format = supportedSaveFormat(imageType)
 			}
+			reports.record("format", ok)
 		case "fallback_format":
-			if imageType, ok := imageTypeMap[f.Args]; ok {
+			imageType, ok := imageTypeMap[f.Args]
+			if ok {
 				fallback = supportedSaveFormat(imageType)
 			}
+			reports.record("fallback_format", ok)
 		case "quality":
-			quality, _ = strconv.Atoi(f.Args)
+			n, err := strconv.Atoi(f.Args)
+			reports.record("quality", err == nil)
+			quality = n
 		case "autojpg":
 			format = vips.ImageTypeJpeg
+			reports.record("autojpg", true)
 		case "palette":
 			palette = true
+			reports.record("palette", true)
 		case "bitdepth":
-			bitdepth, _ = strconv.Atoi(f.Args)
+			n, err := strconv.Atoi(f.Args)
+			reports.record("bitdepth", err == nil)
+			bitdepth = n
 		case "compression":
-			compression, _ = strconv.Atoi(f.Args)
+			n, err := strconv.Atoi(f.Args)
+			reports.record("compression", err == nil)
+			compression = n
 		case "max_bytes":
-			if n, _ := strconv.Atoi(f.Args); n > 0 {
+			n, err := strconv.Atoi(f.Args)
+			reports.record("max_bytes", err == nil && n > 0)
+			if n > 0 {
 				maxBytes = n
 			}
 		case "strip_metadata":
 			stripMetadata = true
+			reports.record("strip_metadata", true)
 		case "strip_icc":
 			stripColorProfile = true
+			reports.record("strip_icc", true)
 		case "lossless":
 			lossless = true
-		}
-	}
-
-	// Default format from blob/image type
-	if format == vips.ImageTypeUnknown {
-		if blob != nil && blob.BlobType() == imagor.BlobTypeAVIF {
-			format = vips.ImageTypeAvif
-		} else {
-			format = img.Format()
+			reports.record("lossless", true)
+		case "avgcolor", "blurhash", "thumbhash":
+			// These are computed after transformations. A successful /meta
+			// response has applied them; an invalid argument returns an error
+			// instead of a report. Register them before the ordered dispatch.
+			if p.Meta {
+				reports.record(f.Name, true)
+			}
 		}
 	}
 
@@ -273,7 +394,20 @@ func (v *Processor) extractExportParams(p imagorpath.Params, blob *imagor.Blob, 
 		stripMetadata:     stripMetadata,
 		lossless:          lossless,
 		maxBytes:          maxBytes,
+	}, reports
+}
+
+// applyDefaultExportFormat picks the output format when no filter asked for one.
+// Unlike the filter scan it needs the loaded image, so it runs afterwards.
+func (v *Processor) applyDefaultExportFormat(params *exportParams, blob *imagor.Blob, img *vips.Image) {
+	if params.format != vips.ImageTypeUnknown {
+		return
 	}
+	if blob != nil && blob.BlobType() == imagor.BlobTypeAVIF {
+		params.format = vips.ImageTypeAvif
+		return
+	}
+	params.format = img.Format()
 }
 
 func (v *Processor) applyAutoFormatFallback(img *vips.Image, params *exportParams) {
@@ -292,6 +426,7 @@ func (v *Processor) applyAutoFormatFallback(img *vips.Image, params *exportParam
 // loadAndProcess loads the image from blob and applies all transformations
 func (v *Processor) loadAndProcess(
 	ctx context.Context, blob *imagor.Blob, p imagorpath.Params, load imagor.LoadFunc,
+	reports *filterReports,
 ) (*vips.Image, error) {
 	if c, ok := parseColorImage(p.Image); ok {
 		w, h := p.Width, p.Height
@@ -322,7 +457,7 @@ func (v *Processor) loadAndProcess(
 				zap.Any("color", c))
 		}
 		// thumbnail=true: image is already at target size, skip resize/crop
-		if err := v.applyTransformations(ctx, img, p, load, true, false, false, nil); err != nil {
+		if err := v.applyTransformations(ctx, img, p, load, true, false, false, nil, reports); err != nil {
 			img.Close()
 			return nil, WrapErr(err)
 		}
@@ -362,7 +497,7 @@ func (v *Processor) loadAndProcess(
 	}
 	fallbackFormat := vips.ImageTypeUnknown
 	for _, f := range p.Filters {
-		if f.Name != "fallback_format" {
+		if f.Name != "fallback_format" || v.disableFilters[f.Name] {
 			continue
 		}
 		if imageType, ok := imageTypeMap[f.Args]; ok {
@@ -375,6 +510,7 @@ func (v *Processor) loadAndProcess(
 		}
 		switch f.Name {
 		case "format":
+			// Applied by the encoding switch in Process; this only bounds frames.
 			if imageType, ok := imageTypeMap[f.Args]; ok {
 				format := supportedSaveFormat(imageType)
 				if !IsAnimationSupported(format) && !IsAnimationSupported(fallbackFormat) {
@@ -383,37 +519,55 @@ func (v *Processor) loadAndProcess(
 				}
 			}
 		case "max_frames":
-			if n, _ := strconv.Atoi(f.Args); n > 0 && (maxN == -1 || n < maxN) {
+			n, err := strconv.Atoi(f.Args)
+			reports.record("max_frames", err == nil && n > 0)
+			if n > 0 && (maxN == -1 || n < maxN) {
 				maxN = n
 			}
 		case "stretch":
 			stretch = true
+			reports.record("stretch", true)
 		case "upscale":
 			upscale = true
+			reports.record("upscale", true)
 		case "no_upscale":
 			upscale = false
+			reports.record("no_upscale", true)
 		case "fill", "background_color":
+			// fill is applied by the dispatch loop; this only notes that
+			// thumbnail shortcuts are unavailable, so recording it would mask a
+			// decline there.
 			if args := strings.Split(f.Args, ","); args[0] == "auto" {
 				thumbnailNotSupported = true
 			}
 		case "page":
-			if n, _ := strconv.Atoi(f.Args); n > 0 {
+			n, err := strconv.Atoi(f.Args)
+			reports.record("page", err == nil && n > 0)
+			if n > 0 {
 				page = n
 			}
 		case "dpi":
-			if n, _ := strconv.Atoi(f.Args); n > 0 {
+			n, err := strconv.Atoi(f.Args)
+			reports.record("dpi", err == nil && n > 0)
+			if n > 0 {
 				dpi = n
 			}
 		case "orient":
-			if n, _ := strconv.Atoi(f.Args); n > 0 {
+			n, err := strconv.Atoi(f.Args)
+			reports.record("orient", err == nil && n > 0)
+			if n > 0 {
 				orient = n
 				thumbnailNotSupported = true
 			}
 		case "max_bytes":
-			if n, _ := strconv.Atoi(f.Args); n > 0 {
+			n, err := strconv.Atoi(f.Args)
+			reports.record("max_bytes", err == nil && n > 0)
+			if n > 0 {
 				thumbnailNotSupported = true
 			}
 		case "trim", "focal", "rotate", "draw_detections":
+			// Applied by the dispatch loop; this only marks the path
+			// thumbnail-incompatible, so recording it would hide a decline there.
 			thumbnailNotSupported = true
 		}
 	}
@@ -525,9 +679,17 @@ func (v *Processor) loadAndProcess(
 		}
 	}
 
+	// caller never receives img on any following error and thus can not close it properly
+	if img != nil {
+		contextDefer(ctx, img.Close)
+	}
+
 	if orient > 0 {
 		// orient rotate before resize
 		if err = img.RotMultiPage(getAngle(orient)); err != nil {
+			return nil, err
+		}
+		if err = rotateGainmap(img, float64(int(getAngle(orient)))); err != nil {
 			return nil, err
 		}
 		// clear EXIF orientation to prevent unexpected rotation from ThumbnailImage
@@ -599,7 +761,7 @@ func (v *Processor) loadAndProcess(
 			})
 		}
 	}
-	if err := v.applyTransformations(ctx, img, p, load, thumbnail, stretch, upscale, focalRects); err != nil {
+	if err := v.applyTransformations(ctx, img, p, load, thumbnail, stretch, upscale, focalRects, reports); err != nil {
 		return nil, WrapErr(err)
 	}
 
@@ -609,6 +771,7 @@ func (v *Processor) loadAndProcess(
 // applyTransformations applies all image transformations (crop, resize, flip, filters)
 func (v *Processor) applyTransformations(
 	ctx context.Context, img *vips.Image, p imagorpath.Params, load imagor.LoadFunc, thumbnail, stretch, upscale bool, focalRects []focal,
+	reports *filterReports,
 ) error {
 	var (
 		origWidth  = float64(img.Width())
@@ -629,14 +792,15 @@ func (v *Processor) applyTransformations(
 			cropRight = math.Round(cropRight * origWidth)
 			cropBottom = math.Round(cropBottom * origHeight)
 		}
+		// right/bottom are exclusive, so the full extent is the image size.
 		if cropRight == 0 {
-			cropRight = origWidth - 1
+			cropRight = origWidth
 		}
 		if cropBottom == 0 {
-			cropBottom = origHeight - 1
+			cropBottom = origHeight
 		}
-		cropRight = math.Min(cropRight, origWidth-1)
-		cropBottom = math.Min(cropBottom, origHeight-1)
+		cropRight = math.Min(cropRight, origWidth)
+		cropBottom = math.Min(cropBottom, origHeight)
 	}
 	if p.Trim {
 		if l, t, w, h, err := findTrim(ctx, img, p.TrimBy, p.TrimTolerance); err == nil {
@@ -655,6 +819,11 @@ func (v *Processor) applyTransformations(
 		}
 	}
 	if cropRight > cropLeft && cropBottom > cropTop {
+		if err := cropGainmap(img,
+			int(cropLeft), int(cropTop), int(cropRight-cropLeft), int(cropBottom-cropTop),
+		); err != nil {
+			return err
+		}
 		if err := img.ExtractAreaMultiPage(
 			int(cropLeft), int(cropTop), int(cropRight-cropLeft), int(cropBottom-cropTop),
 		); err != nil {
@@ -712,6 +881,9 @@ func (v *Processor) applyTransformations(
 			}
 
 			if upscale || w < imgW || h < imgH {
+				if err := attachGainmap(img); err != nil {
+					return err
+				}
 				opts := &vips.ThumbnailImageOptions{Height: h, Crop: vips.InterestingNone}
 				if err := img.ThumbnailImage(w, opts); err != nil {
 					return err
@@ -719,6 +891,9 @@ func (v *Processor) applyTransformations(
 			}
 		} else if stretch {
 			if upscale || (w < imgW && h < imgH) {
+				if err := attachGainmap(img); err != nil {
+					return err
+				}
 				if err := img.ThumbnailImage(
 					w, &vips.ThumbnailImageOptions{Height: h, Crop: vips.InterestingNone, Size: vips.SizeForce},
 				); err != nil {
@@ -753,6 +928,9 @@ func (v *Processor) applyTransformations(
 					return err
 				}
 			} else {
+				if err := attachGainmap(img); err != nil {
+					return err
+				}
 				if err := v.Thumbnail(img, w, h, interest, vips.SizeBoth); err != nil {
 					return err
 				}
@@ -763,47 +941,79 @@ func (v *Processor) applyTransformations(
 		}
 	}
 	if p.HFlip {
+		if err := flipGainmap(img, vips.DirectionHorizontal); err != nil {
+			return err
+		}
 		if err := img.Flip(vips.DirectionHorizontal); err != nil {
 			return err
 		}
 	}
 	if p.VFlip {
+		if err := flipGainmap(img, vips.DirectionVertical); err != nil {
+			return err
+		}
 		if err := img.Flip(vips.DirectionVertical); err != nil {
 			return err
 		}
 	}
-	for i, filter := range p.Filters {
+	ops := 0
+	for _, filter := range p.Filters {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if v.disableFilters[filter.Name] {
 			continue
 		}
-		if v.MaxFilterOps > 0 && i >= v.MaxFilterOps {
-			if v.Debug {
-				v.Logger.Debug("max-filter-ops-exceeded",
-					zap.String("name", filter.Name), zap.String("args", filter.Args))
+		fn := v.Filters[filter.Name]
+		// MaxFilterOps bounds the operations this loop performs, not the filters
+		// in the URL. One handled by an earlier switch, or by nothing at all,
+		// costs nothing here and must not consume the budget of one that does.
+		if fn != nil || filter.Name == "fill" {
+			if v.MaxFilterOps > 0 && ops >= v.MaxFilterOps {
+				if v.Debug {
+					v.Logger.Debug("max-filter-ops-exceeded",
+						zap.String("name", filter.Name), zap.String("args", filter.Args))
+				}
+				// Later export and metadata filters still apply outside this
+				// loop, so only skip this operation, not their reports.
+				continue
 			}
-			break
+			ops++
 		}
 		start := time.Now()
 		var args []string
 		if filter.Args != "" {
 			args = imagorpath.SplitArgs(filter.Args)
 		}
-		if fn := v.Filters[filter.Name]; fn != nil {
-			if err := fn(ctx, img, load, args...); err != nil {
+		// Recognition starts from what Process and loadAndProcess applied, which
+		// this loop cannot see; the rest is unknown.
+		recognised, processed := reports.accepted(filter.Name)
+		// A handler that loads a path of its own (image) leaves that path's
+		// report in the holder, for the entry this occurrence produces.
+		handlerCtx, loaded := withReportsHolder(ctx)
+		if fn != nil {
+			recognised = true
+			applied, err := fn(handlerCtx, img, load, args...)
+			if err != nil {
 				return err
 			}
+			processed = processed || applied
 		} else if filter.Name == "fill" {
-			if err := v.fill(ctx, img, w, h,
+			recognised = true
+			if err := v.fill(handlerCtx, img, w, h,
 				p.PaddingLeft, p.PaddingTop, p.PaddingRight, p.PaddingBottom,
 				filter.Args); err != nil {
 				return err
 			}
+			processed = true
+		}
+		if recognised {
+			// Unhandled names are logged but not recorded: the report covers
+			// only what this processor did.
+			reports.add(filter.Name, processed, loaded.child)
 		}
 		if v.Debug {
-			v.Logger.Debug("filter",
+			v.Logger.Debug(filterEventName(recognised, processed),
 				zap.String("name", filter.Name), zap.String("args", filter.Args),
 				zap.Duration("took", time.Since(start)))
 		}
@@ -835,6 +1045,10 @@ type Metadata struct {
 	BlurHash        string            `json:"blurhash,omitempty"`
 	ThumbHash       string            `json:"thumbhash,omitempty"`
 	AverageColor    *AvgColor         `json:"average_color,omitempty"`
+	// Filters reports what this processor did with each filter in the URL. It is
+	// always present, empty when there was nothing to report: a client needs to
+	// tell a release that reports outcomes from one that predates the field.
+	Filters []FilterReport `json:"filters"`
 }
 
 type AvgColor struct {
@@ -897,38 +1111,47 @@ func (v *Processor) export(
 	switch format {
 	case vips.ImageTypePng:
 		opts := &vips.PngsaveBufferOptions{
-			Q:           quality,
-			Palette:     palette,
-			Bitdepth:    bitdepth,
-			Compression: compression,
+			Palette:  palette,
+			Bitdepth: bitdepth,
+		}
+		// our 0 means "not set"; libvips reads a literal 0 as store-uncompressed, so these stay nil
+		if quality > 0 {
+			opts.Q = vips.Ptr(quality)
+		}
+		if compression > 0 {
+			opts.Compression = vips.Ptr(compression)
 		}
 		if stripMetadata {
-			opts.Keep = vips.KeepNone
+			opts.Keep = vips.Ptr(vips.KeepNone)
 		} else {
-			opts.Keep = vips.KeepAll
+			opts.Keep = vips.Ptr(vips.KeepAll)
 		}
 		return image.PngsaveBuffer(opts)
 	case vips.ImageTypeWebp:
 		opts := &vips.WebpsaveBufferOptions{
-			Q:        quality,
 			Lossless: lossless,
-			Effort:   4,
+			Effort:   vips.Ptr(4),
+		}
+		if quality > 0 {
+			opts.Q = vips.Ptr(quality)
 		}
 		if stripMetadata {
-			opts.Keep = vips.KeepNone
+			opts.Keep = vips.Ptr(vips.KeepNone)
 		} else {
-			opts.Keep = vips.KeepAll
+			opts.Keep = vips.Ptr(vips.KeepAll)
 		}
 		return image.WebpsaveBuffer(opts)
 	case vips.ImageTypeJxl:
 		opts := &vips.JxlsaveBufferOptions{
-			Q:        quality,
 			Lossless: lossless,
 		}
+		if quality > 0 {
+			opts.Q = vips.Ptr(quality)
+		}
 		if stripMetadata {
-			opts.Keep = vips.KeepNone
+			opts.Keep = vips.Ptr(vips.KeepNone)
 		} else {
-			opts.Keep = vips.KeepAll
+			opts.Keep = vips.Ptr(vips.KeepAll)
 		}
 		return image.JxlsaveBuffer(opts)
 	case vips.ImageTypeTiff:
@@ -936,17 +1159,17 @@ func (v *Processor) export(
 			Q: quality,
 		}
 		if stripMetadata {
-			opts.Keep = vips.KeepNone
+			opts.Keep = vips.Ptr(vips.KeepNone)
 		} else {
-			opts.Keep = vips.KeepAll
+			opts.Keep = vips.Ptr(vips.KeepAll)
 		}
 		return image.TiffsaveBuffer(opts)
 	case vips.ImageTypeGif:
 		opts := &vips.GifsaveBufferOptions{}
 		if stripMetadata {
-			opts.Keep = vips.KeepNone
+			opts.Keep = vips.Ptr(vips.KeepNone)
 		} else {
-			opts.Keep = vips.KeepAll
+			opts.Keep = vips.Ptr(vips.KeepAll)
 		}
 		return image.GifsaveBuffer(opts)
 	case vips.ImageTypeAvif:
@@ -956,11 +1179,11 @@ func (v *Processor) export(
 			Lossless:    lossless,
 		}
 		if stripMetadata {
-			opts.Keep = vips.KeepNone
+			opts.Keep = vips.Ptr(vips.KeepNone)
 		} else {
-			opts.Keep = vips.KeepAll
+			opts.Keep = vips.Ptr(vips.KeepAll)
 		}
-		opts.Effort = 9 - v.AvifSpeed
+		opts.Effort = vips.Ptr(9 - v.AvifSpeed)
 		return image.HeifsaveBuffer(opts)
 	case vips.ImageTypeHeif:
 		opts := &vips.HeifsaveBufferOptions{
@@ -968,9 +1191,9 @@ func (v *Processor) export(
 			Lossless: lossless,
 		}
 		if stripMetadata {
-			opts.Keep = vips.KeepNone
+			opts.Keep = vips.Ptr(vips.KeepNone)
 		} else {
-			opts.Keep = vips.KeepAll
+			opts.Keep = vips.Ptr(vips.KeepAll)
 		}
 		return image.HeifsaveBuffer(opts)
 	case vips.ImageTypeJp2k:
@@ -979,16 +1202,16 @@ func (v *Processor) export(
 			Lossless: lossless,
 		}
 		if stripMetadata {
-			opts.Keep = vips.KeepNone
+			opts.Keep = vips.Ptr(vips.KeepNone)
 		} else {
-			opts.Keep = vips.KeepAll
+			opts.Keep = vips.Ptr(vips.KeepAll)
 		}
 		return image.Jp2ksaveBuffer(opts)
 	default:
 		opts := &vips.JpegsaveBufferOptions{}
 		if v.MozJPEG {
 			opts.Q = 75
-			opts.Keep = vips.KeepNone
+			opts.Keep = vips.Ptr(vips.KeepNone)
 			opts.OptimizeCoding = true
 			opts.Interlace = true
 			opts.OptimizeScans = true
@@ -999,9 +1222,9 @@ func (v *Processor) export(
 			opts.Q = quality
 		}
 		if stripMetadata {
-			opts.Keep = vips.KeepNone
+			opts.Keep = vips.Ptr(vips.KeepNone)
 		} else if !v.MozJPEG {
-			opts.Keep = vips.KeepAll
+			opts.Keep = vips.Ptr(vips.KeepAll)
 		}
 		return image.JpegsaveBuffer(opts)
 	}
@@ -1061,7 +1284,7 @@ func findTrim(
 		return
 	}
 	l, t, w, h, err = tmp.FindTrim(&vips.FindTrimOptions{
-		Threshold:  float64(tolerance),
+		Threshold:  vips.Ptr(float64(tolerance)),
 		Background: background,
 	})
 	return

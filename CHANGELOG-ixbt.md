@@ -1,57 +1,18 @@
-# ixbtcom/imagor - delta vs upstream
+# ixbtcom/imagor — отличия от upstream
 
-Base: upstream `v1.9.2`.
+База: официальный release upstream `v1.10.0` (`ee84d50`). Ниже перечислена только сохраняемая дельта форка.
 
-- fix(s3storage): `Put` uses `Blob.NewReadSeeker()` so the AWS SDK can seek the
-  body - to compute the signed payload hash over plain HTTP, and to rewind on a
-  retryable error over HTTPS (SeaweedFS S3 gateway behind OPNsense HAProxy).
-  Prevents "request stream is not seekable" save failures for loader-sourced
-  originals.
-- fix(imagor): single-flight the original storage save by `storageKey`, so N
-  concurrent variants of one new original save it once (kills the parallel-save
-  herd and the delete-after-save-error race that keeps originals from caching).
-- fix(vipsprocessor): enable strict source decoding for both thumbnail and full
-  image loads. A prematurely closed HTTP body is rejected instead of being
-  encoded and cached as a structurally valid but visually corrupted AVIF/WebP.
-- fix(vipsprocessor): return HTTP 424 for strict source-decode failures while
-  keeping deterministic libvips processing errors on HTTP 406. This lets the
-  ingress retry only a failed source dependency without flooding the slow pool
-  with invalid transforms.
-- fix(vipsprocessor): preserve the underlying source-reader failure separately
-  from libvips' error buffer. Some truncated streams otherwise surface only as
-  `vips: empty error buffer`; they now keep the same retryable HTTP 424 contract,
-  while an empty buffer without a source failure remains HTTP 406.
-- feat(imagor): add `IMAGOR_TIMEOUT_STATUS_CODE` with backward-compatible
-  default HTTP 408. A fast role behind nginx can return retryable HTTP 424 for
-  its own deadline, because nginx does not intercept an upstream HTTP 408;
-  final fallback roles can keep 408 visible to clients and monitoring.
-
-- feat(imagor): `IMAGOR_CONTENT_ETAG` (default off) sets a strong
-  `ETag: "<md5 of body>-<format>"` on fresh and result-storage responses alike,
-  answers a matching `If-None-Match` (list, `W/`, `*`) with 304 and ignores
-  `If-Modified-Since` (the caches in front answer it). Since ixbt9 the response carries
-  `Last-Modified` = result storage write time (`Stat.ModifiedTime`: file mtime, S3
-  LastModified), for a fresh result the generation time, capped at now with second
-  precision; the value is the same for every later response until the result is
-  regenerated. It lets Googlebot-Image (which sends `If-Modified-Since`, not
-  `If-None-Match`) get 304 from the caches. Up to ixbt8 `Last-Modified` was dropped.
-  Caches in front (nginx `proxy_cache_revalidate`) revalidate by content, and a
-  regenerated image with other bytes gets a new ETag.
-- feat(storage): `Stat.ContentMD5` lets a storage hand over a known md5.
-  filestorage publishes a file atomically (temp file in the same dir, xattr
-  `user.imagor.md5 = <md5>:<size>`, then rename, or link for SaveErrIfExists),
-  trusts the attribute only when the size matches and backfills it on the first
-  read of an older file (through the descriptor that was hashed, so a concurrent
-  Put cannot get a foreign md5); s3storage takes the md5 from a single-part S3 ETag.
-  filestorage fills `Stat.ContentMD5` regardless of `IMAGOR_CONTENT_ETAG`: reading
-  the attribute is one syscall, and a file without it is hashed once. A process
-  killed between the temp file and the rename leaves `<dir>/.imagor-*`; they are
-  dotfiles (never served) and can be swept with `find <dir> -name '.imagor-*' -mmin +60 -delete`.
-- fix(vipsprocessor): `animatedThumbnailWithCrop` clamps the crop box to the
-  frame. With `no_upscale()` (our `IMAGOR_BASE_PARAMS`) a WebP/GIF source to an
-  animation-capable output (WebP) went through the multi-page path even for a
-  single frame, and a box larger than the frame on one side only failed with
-  `extract_area: bad extract area` (HTTP 406). It now crops to the frame, like
-  the single-page libvips thumbnail path: 569x502 -> `718x500` gives 569x500.
-
-All listed changes are candidates for an upstream PR (kept out of the PR branch; fork-only doc).
+- **Сохранение в S3:** `Put` передаёт тело через `Blob.NewReadSeeker()`. AWS SDK может вычислить подпись при HTTP и повторно прочитать тело после временной ошибки HTTPS; исходный поток загрузчика не вызывает ошибку `request stream is not seekable`. Нативная обработка неизвестного размера сохранена.
+- **Публичные S3-источники без подписи:** `S3_LOADER_ANONYMOUS` (по умолчанию выключен) исключает глобальные и loader-specific credentials только из S3 Loader, включая Router. Original/Result Storage сохраняют свои подписанные запросы; явно заданные credentials отдельного bucket в Router имеют приоритет.
+- **HTTP URL в native S3 Router:** captured object path декодируется стандартным `url.PathUnescape` ровно один раз. Source identity/result key не меняются; bare S3 keys сохраняют literal percent. `%20`, `%2520`, Unicode и `+` не перепутаны с другим объектом.
+- **S3 без дополнительной копии в RAM:** для original неизвестного размера длина определяется через существующий file-backed seeker, затем поток перематывается для подписанной загрузки. Chunked original не дублируется целиком в памяти.
+- **S3 result prefix:** выбор bucket из source context применяется только к wildcard `*`; фиксированный result bucket проверяет prefix ключа результата, а не URL оригинала.
+- **Вложенные `path:` при ограниченной конкурентности:** nested singleflight отделён от обычных запросов. Вложенная операция не ждёт обычную операцию, которая сама ждёт занятый родителем semaphore; дедупликация nested-операций сохраняется.
+- **Однократное сохранение оригинала:** `saveGroup` объединяет конкурентные сохранения по `storageKey`. Разные варианты одного нового оригинала не пишут его параллельно и не удаляют успешную запись из-за ошибки соседнего сохранения.
+- **Строгое декодирование:** и thumbnail, и полная загрузка используют `FailOnError`. Оборванный источник не превращается в формально корректный, но визуально повреждённый AVIF/WebP.
+- **HTTP 424 для ошибки источника:** строгие ошибки чтения и преждевременно завершившийся поток возвращают `Failed Dependency`; детерминированные ошибки обработки libvips остаются HTTP 406. Ошибка чтения сохраняется независимо от диагностического буфера libvips, включая `vips: empty error buffer`. Используется нативный request-local tracker v1.10 с дополнительной проверкой `Err()` seekstream: чистый EOF раньше заявленного размера тоже считается обрывом. Проверка выполняется перед выдачей результата; повреждённый результат не сохраняется.
+- **Код ответа по тайм-ауту:** `IMAGOR_TIMEOUT_STATUS_CODE`, по умолчанию HTTP 408. Быстрая роль за nginx может отвечать HTTP 424 для перехода к следующей роли; последняя роль может сохранять HTTP 408.
+- **ETag по содержимому:** `IMAGOR_CONTENT_ETAG` (по умолчанию выключен) задаёт сильный `ETag: "<md5 тела>-<формат>"` и для свежего результата, и для результата из хранилища. Совпадение `If-None-Match` (включая список, `W/`, `*`) даёт HTTP 304. `If-Modified-Since` обрабатывают внешние кеши, а не этот режим Imagor.
+- **Last-Modified результата:** в режиме content ETag это время записи результата (`Stat.ModifiedTime`: mtime файла или S3 LastModified), для свежего результата — время генерации. Значение ограничено текущим временем и округлено до секунды; до следующей генерации оно стабильно. Это позволяет внешним кешам отвечать на `If-Modified-Since`, не меняя проверку оригинала.
+- **Сохранённый MD5:** `Stat.ContentMD5` передаёт известный хеш из хранилища. Файловое хранилище публикует результат атомарно: временный файл в том же каталоге, xattr `user.imagor.md5 = <md5>:<размер>`, затем rename (либо link для `SaveErrIfExists`). Атрибут принимается только при совпадении размера. Старый файл хешируется один раз; xattr дописывается через тот же открытый дескриптор, чтобы конкурентная запись не получила чужой MD5. Это работает независимо от `IMAGOR_CONTENT_ETAG`. S3 использует MD5 только из ETag односоставной загрузки. Оставшиеся после остановки процесса `.imagor-*` не раздаются; эта интеграция не удаляет их и не очищает кеши.
+- **Обрезка без увеличения:** `animatedThumbnailWithCrop` ограничивает область размерами кадра. При `no_upscale()` многокадровый путь, в том числе для WebP с одним кадром, не падает с `extract_area: bad extract area`, когда кадр меньше целевой области только по одной стороне: 569×502 → `718x500` даёт 569×500.

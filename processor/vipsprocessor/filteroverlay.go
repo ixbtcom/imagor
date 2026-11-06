@@ -9,10 +9,10 @@ import (
 
 	"github.com/cshum/imagor"
 	"github.com/cshum/imagor/imagorpath"
-	"github.com/cshum/vipsgen/vips"
+	"github.com/cshum/vipsgen/v2/vips"
 )
 
-func (v *Processor) image(ctx context.Context, img *vips.Image, load imagor.LoadFunc, args ...string) (err error) {
+func (v *Processor) image(ctx context.Context, img *vips.Image, load imagor.LoadFunc, args ...string) (processed bool, err error) {
 	ln := len(args)
 	if ln < 1 {
 		return
@@ -23,7 +23,7 @@ func (v *Processor) image(ctx context.Context, img *vips.Image, load imagor.Load
 	}
 	// Resolve f-token dimension placeholders (e.g. fxf, f-20xf-20) against the
 	// parent image's pixel dimensions before handing the path to the parser.
-	imagorPath = resolveFullDimensions(imagorPath, img.Width(), img.PageHeight())
+	imagorPath = imagorpath.ResolveFullDimensions(imagorPath, img.Width(), img.PageHeight())
 	params := imagorpath.Parse(imagorPath)
 	var blob *imagor.Blob
 	// Skip loader for color: image paths — they are generated in-process
@@ -60,10 +60,10 @@ func (v *Processor) image(ctx context.Context, img *vips.Image, load imagor.Load
 	}
 
 	// Transform and composite overlay onto image
-	return compositeOverlay(img, overlay, xArg, yArg, alpha, blendMode)
+	return true, compositeOverlay(img, overlay, xArg, yArg, alpha, blendMode)
 }
 
-func (v *Processor) watermark(ctx context.Context, img *vips.Image, load imagor.LoadFunc, args ...string) (err error) {
+func (v *Processor) watermark(ctx context.Context, img *vips.Image, load imagor.LoadFunc, args ...string) (processed bool, err error) {
 	ln := len(args)
 	if ln < 1 {
 		return
@@ -123,11 +123,17 @@ func (v *Processor) watermark(ctx context.Context, img *vips.Image, load imagor.
 	}
 
 	// Transform and composite overlay onto image
-	return compositeOverlay(img, overlay, xArg, yArg, alpha, vips.BlendModeOver)
+	return true, compositeOverlay(img, overlay, xArg, yArg, alpha, vips.BlendModeOver)
 }
 
 func (v *Processor) fill(ctx context.Context, img *vips.Image, w, h int, pLeft, pTop, pRight, pBottom int, colour string) (err error) {
-	if isRotate90(ctx) {
+	if isRotateArbitrary(ctx) {
+		// Non-orthogonal rotation (e.g. rotate(45)) changes the image dimensions
+		// unpredictably. Use the actual image bounds as the target dimensions so
+		// fill pads around the rotated bounding box rather than clipping it.
+		w = img.Width()
+		h = img.PageHeight()
+	} else if isRotate90(ctx) {
 		tmpW := w
 		w = h
 		h = tmpW
@@ -163,27 +169,45 @@ func (v *Processor) fill(ctx context.Context, img *vips.Image, w, h int, pLeft, 
 					return
 				}
 			}
+			if err = embedGainmap(img, left, top, width, height, &vips.EmbedMultiPageOptions{Extend: vips.ExtendBlack}); err != nil {
+				return
+			}
 			if err = img.EmbedMultiPage(left, top, width, height, &vips.EmbedMultiPageOptions{Extend: vips.ExtendBlack}); err != nil {
 				return
 			}
 		} else if isBlack(c) {
+			if err = embedGainmap(img, left, top, width, height, &vips.EmbedMultiPageOptions{Extend: vips.ExtendBlack}); err != nil {
+				return
+			}
 			if err = img.EmbedMultiPage(left, top, width, height, &vips.EmbedMultiPageOptions{Extend: vips.ExtendBlack}); err != nil {
 				return
 			}
 		} else if isWhite(c) {
+			if err = embedGainmap(img, left, top, width, height, &vips.EmbedMultiPageOptions{Extend: vips.ExtendWhite}); err != nil {
+				return
+			}
 			if err = img.EmbedMultiPage(left, top, width, height, &vips.EmbedMultiPageOptions{Extend: vips.ExtendWhite}); err != nil {
 				return
 			}
 		} else {
-			if err = img.EmbedMultiPage(left, top, width, height, &vips.EmbedMultiPageOptions{
+			opts := &vips.EmbedMultiPageOptions{
 				Extend:     vips.ExtendBackground,
 				Background: c,
-			}); err != nil {
+			}
+			if err = embedGainmap(img, left, top, width, height, opts); err != nil {
+				return
+			}
+			if err = img.EmbedMultiPage(left, top, width, height, opts); err != nil {
 				return
 			}
 		}
 	} else {
 		// fill blur
+		// The blur fill resizes the image to the canvas, which updates the
+		// attached gain map; padding it here would scale it twice.
+		if err = attachGainmap(img); err != nil {
+			return
+		}
 		var cp *vips.Image
 		if cp, err = img.Copy(nil); err != nil {
 			return
@@ -210,7 +234,7 @@ func (v *Processor) fill(ctx context.Context, img *vips.Image, w, h int, pLeft, 
 	return
 }
 
-func label(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+func label(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	ln := len(args)
 	if ln == 0 {
 		return
@@ -278,10 +302,10 @@ func label(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string
 			return
 		}
 	}
-	return compositeOverlay(img, textImg, xArg, yArg, alpha, vips.BlendModeOver)
+	return true, compositeOverlay(img, textImg, xArg, yArg, alpha, vips.BlendModeOver)
 }
 
-func text(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (err error) {
+func text(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string) (processed bool, err error) {
 	// text(text,x,y,font,color,alpha,blend_mode,width,align,justify,wrap,spacing,dpi)
 	// font includes size e.g. "sans bold 24", "monospace 18"
 	ln := len(args)
@@ -404,5 +428,5 @@ func text(_ context.Context, img *vips.Image, _ imagor.LoadFunc, args ...string)
 			return
 		}
 	}
-	return compositeOverlay(img, textImg, xArg, yArg, alpha, blendMode)
+	return true, compositeOverlay(img, textImg, xArg, yArg, alpha, blendMode)
 }

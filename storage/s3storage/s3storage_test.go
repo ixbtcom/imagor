@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -490,6 +491,74 @@ func TestWithForcePathStyleDefault(t *testing.T) {
 	assert.True(t, s2.ForcePathStyle)
 }
 
+func TestWithStorageClass(t *testing.T) {
+	tests := []struct {
+		name          string
+		storageClass  string
+		expectedClass string
+	}{
+		{
+			name:          "valid storage class",
+			storageClass:  "GLACIER",
+			expectedClass: "GLACIER",
+		},
+		{
+			name:          "invalid storage class falls back to STANDARD",
+			storageClass:  "NOT_A_CLASS",
+			expectedClass: "STANDARD",
+		},
+		{
+			name:          "empty storage class falls back to STANDARD",
+			storageClass:  "",
+			expectedClass: "STANDARD",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := aws.Config{Region: "us-east-1"}
+			s := New(cfg, "test-bucket", WithStorageClass(tt.storageClass))
+			assert.Equal(t, tt.expectedClass, s.StorageClass)
+		})
+	}
+}
+
+func TestWithTaggingOption(t *testing.T) {
+	tests := []struct {
+		name            string
+		tagging         string
+		initialTagging  string
+		expectedTagging string
+	}{
+		{
+			name:            "valid tagging is set",
+			tagging:         "foo=bar&source=imagor",
+			initialTagging:  "",
+			expectedTagging: "foo=bar&source=imagor",
+		},
+		{
+			name:            "whitespace only does not overwrite",
+			tagging:         "   ",
+			initialTagging:  "keep=this",
+			expectedTagging: "keep=this",
+		},
+		{
+			name:            "invalid query string does not overwrite",
+			tagging:         "%zz",
+			initialTagging:  "keep=this",
+			expectedTagging: "keep=this",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &S3Storage{Tagging: tt.initialTagging}
+			WithTagging(tt.tagging)(s)
+			assert.Equal(t, tt.expectedTagging, s.Tagging)
+		})
+	}
+}
+
 func TestWildcardBucket_Path(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -606,6 +675,85 @@ func TestWildcardBucket_CRUD(t *testing.T) {
 	assert.Equal(t, imagor.ErrNotFound, err)
 }
 
+func TestWildcardBucket_ResultCRUDUsesSourceBucket(t *testing.T) {
+	ts := fakeS3Server()
+	defer ts.Close()
+
+	ctx := context.Background()
+	r := (&http.Request{}).WithContext(ctx)
+
+	cfg := fakeS3Config(ts, "bucket-a")
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(ts.URL)
+		o.UsePathStyle = true
+	})
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("bucket-b")})
+	require.NoError(t, err)
+
+	s := New(cfg, "*", WithEndpoint(ts.URL), WithForcePathStyle(true))
+	resultKey := "/1600x0/filters:format(webp)/bucket-b/images/photo.jpg"
+	sourceKey := "/bucket-b/images/photo.jpg"
+	ctx = imagor.ContextWithSourceImageKey(ctx, sourceKey)
+	r = r.WithContext(ctx)
+	bucket, storedKey, ok := s.resolveRequest(ctx, resultKey)
+	require.True(t, ok)
+	assert.Equal(t, "bucket-b", bucket)
+
+	require.NoError(t, s.Put(ctx, resultKey, imagor.NewBlobFromBytes([]byte("result-b"))))
+
+	b, err := s.Get(r, resultKey)
+	require.NoError(t, err)
+	buf, err := b.ReadAll()
+	require.NoError(t, err)
+	assert.Equal(t, "result-b", string(buf))
+
+	stat, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(storedKey),
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, stat)
+
+	require.NoError(t, s.Delete(ctx, resultKey))
+	_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(storedKey),
+	})
+	require.Error(t, err)
+}
+
+func TestWildcardBucket_ResolveRequest(t *testing.T) {
+	cfg := aws.Config{Region: "us-east-1"}
+	s := New(cfg, "*", WithPathPrefix("/cache"))
+
+	t.Run("falls back to image path without source context", func(t *testing.T) {
+		bucket, key, ok := s.resolveRequest(context.Background(), "/bucket-a/cache/result.webp")
+		require.True(t, ok)
+		assert.Equal(t, "bucket-a", bucket)
+		assert.Equal(t, "result.webp", key)
+	})
+
+	t.Run("uses source path from context", func(t *testing.T) {
+		ctx := imagor.ContextWithSourceImageKey(context.Background(), "/bucket-b/cache/source/image.jpg")
+		bucket, key, ok := s.resolveRequest(ctx, "/cache/processed/result.webp")
+		require.True(t, ok)
+		assert.Equal(t, "bucket-b", bucket)
+		assert.Equal(t, "processed/result.webp", key)
+	})
+
+	t.Run("fails when source path in context is invalid", func(t *testing.T) {
+		ctx := imagor.ContextWithSourceImageKey(context.Background(), "invalid-source")
+		_, _, ok := s.resolveRequest(ctx, "/cache/processed/result.webp")
+		assert.False(t, ok)
+	})
+
+	t.Run("fails when result key does not match path prefix", func(t *testing.T) {
+		ctx := imagor.ContextWithSourceImageKey(context.Background(), "/bucket-b/cache/source/image.jpg")
+		_, _, ok := s.resolveRequest(ctx, "/other/processed/result.webp")
+		assert.False(t, ok)
+	})
+}
+
 func TestLocalstackCompatibility(t *testing.T) {
 	cfg := aws.Config{
 		Region: "us-east-1",
@@ -699,4 +847,47 @@ func TestCRUDContentMD5(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, b.Stat)
 	assert.Equal(t, "37b51d194a7513e45b56f6524f2d51f2", b.Stat.ContentMD5)
+}
+
+func TestPut_UnknownSize(t *testing.T) {
+	ts := fakeS3Server()
+	defer ts.Close()
+
+	ctx := context.Background()
+	r := (&http.Request{}).WithContext(ctx)
+	s := New(fakeS3Config(ts, "test"), "test", WithEndpoint(ts.URL), WithForcePathStyle(true))
+
+	// A loader reports size 0 when the origin sends no Content-Length (chunked response).
+	blob := imagor.NewBlob(func() (io.ReadCloser, int64, error) {
+		return io.NopCloser(strings.NewReader("chunked body")), 0, nil
+	})
+	require.NoError(t, s.Put(ctx, "/foo/chunked", blob))
+
+	b, err := s.Get(r, "/foo/chunked")
+	require.NoError(t, err)
+	buf, err := b.ReadAll()
+	require.NoError(t, err)
+	assert.Equal(t, "chunked body", string(buf))
+}
+
+func TestFixedBucketResultPrefixIgnoresSourcePrefix(t *testing.T) {
+	ts := fakeS3Server()
+	defer ts.Close()
+	ctx := imagor.ContextWithSourceImageKey(context.Background(), "https://example.com/source.jpg")
+	s := New(fakeS3Config(ts, "test"), "test", WithPathPrefix("/cache"),
+		WithEndpoint(ts.URL), WithForcePathStyle(true))
+	const key = "/cache/processed.webp"
+	require.NoError(t, s.Put(ctx, key, imagor.NewBlobFromBytes([]byte("processed"))))
+	blob, err := s.Get((&http.Request{}).WithContext(ctx), key)
+	require.NoError(t, err)
+	body, err := blob.ReadAll()
+	require.NoError(t, err)
+	assert.Equal(t, "processed", string(body))
+	stat, err := s.Stat(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(body)), stat.Size)
+	require.ErrorIs(t, s.Put(ctx, "/outside.webp", imagor.NewBlobFromBytes(body)), imagor.ErrInvalid)
+	require.NoError(t, s.Delete(ctx, key))
+	_, err = s.Stat(ctx, key)
+	require.ErrorIs(t, err, imagor.ErrNotFound)
 }

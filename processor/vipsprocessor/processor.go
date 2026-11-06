@@ -13,41 +13,10 @@ import (
 	"time"
 
 	"github.com/cshum/imagor"
-	"github.com/cshum/vipsgen/vips"
+	"github.com/cshum/vipsgen/v2/vips"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 )
-
-type sourceReadTracker struct {
-	io.ReadSeekCloser
-	mu      sync.Mutex
-	readErr error
-}
-
-func (r *sourceReadTracker) Read(p []byte) (int, error) {
-	n, err := r.ReadSeekCloser.Read(p)
-	if err != nil && err != io.EOF && err != io.ErrClosedPipe {
-		r.mu.Lock()
-		if r.readErr == nil {
-			r.readErr = err
-		}
-		r.mu.Unlock()
-	}
-	return n, err
-}
-
-func (r *sourceReadTracker) Err() error {
-	r.mu.Lock()
-	err := r.readErr
-	r.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	if reporter, ok := r.ReadSeekCloser.(sourceErrorReporter); ok {
-		return reporter.Err()
-	}
-	return nil
-}
 
 type sourceDependencyError struct {
 	processErr error
@@ -64,14 +33,19 @@ func (e *sourceDependencyError) Error() string {
 func (e *sourceDependencyError) Unwrap() error { return e.processErr }
 
 func newSourceDependencyError(processErr, readErr error) error {
-	if processErr == nil || readErr == nil {
+	if readErr == nil {
 		return processErr
 	}
 	return &sourceDependencyError{processErr: processErr, readErr: readErr}
 }
 
-// FilterFunc filter handler function
-type FilterFunc func(ctx context.Context, img *vips.Image, load imagor.LoadFunc, args ...string) (err error)
+// FilterFunc filter handler function.
+//
+// processed reports whether the filter recognised its arguments and performed the
+// operation; false means it declined and left the image unchanged, whether from
+// missing or invalid arguments, a documented no-op, or a missing dependency such
+// as no configured Detector.
+type FilterFunc func(ctx context.Context, img *vips.Image, load imagor.LoadFunc, args ...string) (processed bool, err error)
 
 // FilterMap filter handler map
 type FilterMap map[string]FilterFunc
@@ -116,7 +90,6 @@ type Processor struct {
 	cache          *imageCache
 	cacheSF        singleflight.Group
 	hasDcrawload   bool
-	processFunc    processFunc
 }
 
 // NewProcessor create Processor
@@ -143,6 +116,7 @@ func NewProcessor(options ...Option) *Processor {
 		"label":            label,
 		"text":             text,
 		"grayscale":        grayscale,
+		"invert":           invert,
 		"brightness":       brightness,
 		"background_color": backgroundColor,
 		"contrast":         contrast,
@@ -265,10 +239,7 @@ func (v *Processor) Shutdown(ctx context.Context) error {
 
 func (v *Processor) newSourceReaderFromBlob(blob *imagor.Blob) (io.ReadCloser, error) {
 	reader, _, err := blob.NewReadSeeker()
-	if err != nil {
-		return nil, err
-	}
-	return &sourceReadTracker{ReadSeekCloser: reader}, nil
+	return reader, err
 }
 
 func (v *Processor) newSourceFromBlob(ctx context.Context, blob *imagor.Blob) (*vips.Source, error) {
@@ -276,10 +247,11 @@ func (v *Processor) newSourceFromBlob(ctx context.Context, blob *imagor.Blob) (*
 	if err != nil {
 		return nil, err
 	}
-	if tracker, ok := reader.(*sourceReadTracker); ok {
-		contextTrackSource(ctx, tracker)
+	if reporter, ok := reader.(sourceErrorReporter); ok {
+		trackSourceRead(ctx, reporter)
 	}
 	src := vips.NewSource(reader)
+	trackSourceRead(ctx, src)
 	contextDefer(ctx, src.Close)
 	return src, nil
 }
@@ -346,7 +318,7 @@ func (v *Processor) dcrawloadFromBlob(ctx context.Context, blob *imagor.Blob) (*
 	if err != nil {
 		return nil, err
 	}
-	img, err := vips.NewDcrawloadSource(src, vips.DefaultDcrawloadSourceOptions())
+	img, err := vips.NewDcrawloadSource(src, nil)
 	if err != nil {
 		src.Close()
 		return nil, err
@@ -515,6 +487,9 @@ func (v *Processor) Thumbnail(
 
 // FocalThumbnail handles thumbnail with custom focal point
 func (v *Processor) FocalThumbnail(img *vips.Image, w, h int, imgAspect, fx, fy float64) (err error) {
+	if err = attachGainmap(img); err != nil {
+		return
+	}
 	if float64(w)/float64(h) > imgAspect {
 		if err = img.ThumbnailImage(w, &vips.ThumbnailImageOptions{
 			Height: v.MaxHeight, Crop: vips.InterestingNone,
@@ -533,6 +508,9 @@ func (v *Processor) FocalThumbnail(img *vips.Image, w, h int, imgAspect, fx, fy 
 	top = float64(img.PageHeight())*fy - float64(h)/2
 	left = math.Max(0, math.Min(left, float64(img.Width()-w)))
 	top = math.Max(0, math.Min(top, float64(img.PageHeight()-h)))
+	if err = cropGainmap(img, int(left), int(top), w, h); err != nil {
+		return
+	}
 	return img.ExtractAreaMultiPage(int(left), int(top), w, h)
 }
 

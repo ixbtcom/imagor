@@ -18,6 +18,8 @@ Filters `/filters:NAME(ARGS):NAME(ARGS):.../` is a pipeline of image operations 
 /filters:fill(white):watermark(raw.githubusercontent.com/cshum/imagor/master/testdata/gopher-front.png,repeat,bottom,10):format(jpeg)/
 ```
 
+Filters come after the parameters and before the image, as in `200x200/filters:grayscale()/photo.jpg`. Everything after `filters:` is read as the image, so a parameter written after the filters becomes part of the image name, and the request fails to load it.
+
 Filters are grouped into:
 
 - [Processing Filters](#processing-filters) — image transforms
@@ -37,6 +39,8 @@ Sets the background color of a transparent image.
 ### `blur(sigma)`
 
 Applies gaussian blur to the image.
+
+This filter is a no-op for animated images.
 
 - `sigma` — blur sigma value
 
@@ -147,7 +151,13 @@ Adds a focal region or focal point for custom transformations.
 
 Specifies the output format of the image.
 
-- `format` — accepts `jpeg`, `png`, `gif`, `webp`, `avif`, `jxl`, `tiff`, `jp2`
+- `format` — accepts `jpeg`, `png`, `gif`, `webp`, `avif`, `heif`, `jxl`, `tiff`, `jp2`
+
+#### `format(svg)`
+
+Returns an SVG source as the vector itself, without rasterizing it. The document is sanitized before it is served.
+
+Returns HTTP 400 when the source is not an SVG, when it is combined with a resize, crop or filter, or when the document cannot be sanitized.
 
 ---
 
@@ -182,22 +192,13 @@ Composites a processed image onto the current image with full imagor transformat
 - `imagorpath` — an imagor path with transformations e.g. `/200x200/filters:grayscale()/photo.jpg`
   - The nested path supports all imagor operations: resizing, cropping, filters, etc.
   - Enables recursive nesting — images can load other processed images
+  - Positions are relative to the overlay's own canvas, so `center` centres within the overlay rather than the parent. Put a `text()` in the nested path to centre a label under the image it describes.
   - Use `full` (or `f`) in the `WxH` dimension segment to inherit the parent image's width or height. `full` means the full parent dimension; `full-NNN` means the parent dimension minus NNN pixels. Examples:
     - `fullxfull/overlay.png` (or `fxf`) — overlay fills the parent canvas exactly
     - `fit-in/full-20xfull-20/overlay.png` (or `fit-in/f-20xf-20`) — overlay fits within the parent canvas with a 20px inset on each side
     - `fullx200/banner.png` — overlay inherits parent width, fixed 200px height
-- `x` — horizontal position (defaults to 0 if not specified):
-  - Positive number indicates position from the left, negative from the right
-  - Number followed by `p` e.g. `20p` means percentage of image width
-  - `left` or `l`, `right` or `r`, `center` for alignment, optionally with pixel offset e.g. `left-20`, `r-10`
-  - `repeat` to tile horizontally
-  - Float between 0–1 represents percentage e.g. `0.5` for center
-- `y` — vertical position (defaults to 0 if not specified):
-  - Positive number indicates position from the top, negative from the bottom
-  - Number followed by `p` e.g. `20p` means percentage of image height
-  - `top` or `t`, `bottom` or `b`, `center` for alignment, optionally with pixel offset e.g. `top-10`, `b-20`
-  - `repeat` to tile vertically
-  - Float between 0–1 represents percentage e.g. `0.5` for center
+- `x` — horizontal position (defaults to 0 if not specified): see [Horizontal position](#horizontal-position)
+- `y` — vertical position (defaults to 0 if not specified): see [Vertical position](#vertical-position)
 - `alpha` — transparency level, 0 (fully opaque) to 100 (fully transparent)
 - `blend_mode` — compositing blend mode, defaults to `normal`. Supported modes: `normal`, `multiply`, `screen`, `overlay`, `darken`, `lighten`, `color-dodge`, `color-burn`, `hard-light`, `soft-light`, `difference`, `exclusion`, `add`, `mask`, `mask-out`
 
@@ -205,7 +206,7 @@ Composites a processed image onto the current image with full imagor transformat
   <tr>
     <th width="33%"><code>image(/fit-in/100x100/IMAGE,center,center)</code></th>
     <th width="33%"><code>image(/fit-in/100x100/IMAGE,center,center,50)</code></th>
-    <th width="33%">Recursive: <code>image(filters:image(…)/OUTER,10,10)</code></th>
+    <th width="33%">Recursive: <code>image(fit-in/100x100/filters:image(fit-in/50x50/INNER,5,5)/OUTER,10,10)</code></th>
   </tr>
   <tr>
     <td><img src="/img/filters/image-center.jpg" /></td>
@@ -213,6 +214,22 @@ Composites a processed image onto the current image with full imagor transformat
     <td><img src="/img/filters/image-nested.jpg" /></td>
   </tr>
 </table>
+
+---
+
+### `invert()`
+
+Inverts the RGB channels of the image while preserving alpha.
+
+---
+
+### `lang(accept-language)`
+
+Selects the language of a multi-language SVG.
+
+- `accept-language` — comma-separated BCP47 tags, e.g. `en,zh-CN`
+- Branches matching none of the tags are dropped. Where more than one matches, the document's order decides
+- SVG sources only. Returns HTTP 400 when a tag is not a language tag
 
 ---
 
@@ -328,7 +345,10 @@ Amount of color in each of the RGB channels in %. Can range from -100 to 100.
 
 Rotates the given image according to the angle value.
 
-- `angle` — accepts `0`, `90`, `180`, `270`
+- `angle` — accepts angle in degrees. 
+  - `90`, `180`, `270` rotate clockwise. 
+  - Negative values rotate anti-clockwise e.g. `-45` for 45° anti-clockwise. 
+  - Non-orthogonal angles e.g. `45`, `-45` expand the image dimensions to fit the rotated bounding box with transparent areas.
 
 <table width="33%">
   <tr><th><code>rotate(90)</code></th></tr>
@@ -376,6 +396,8 @@ Increases or decreases the image saturation.
 
 Sharpens the image.
 
+This filter is a no-op for animated images.
+
 - `sigma` — sharpening sigma value
 
 <table width="33%">
@@ -402,17 +424,9 @@ Removes the embedded ICC color profile from the resulting image. The image is fi
 Renders a text overlay onto the image with full multi-line and Pango font support.
 
 - `text` — the text to render. Supports URL query-encoding and `b64:` prefix for [base64url](https://developer.mozilla.org/en-US/docs/Glossary/Base64#url_and_filename_safe_base64) encoding to safely pass arbitrary unicode or multi-word strings.
+- `x` — horizontal position: see [Horizontal position](#horizontal-position)
+- `y` — vertical position, the top of the text box rather than a baseline, so a few pixels out is visible: see [Vertical position](#vertical-position)
 - `font` — Pango font description with hyphens as space separators, e.g. `sans-bold-24` for `sans bold 24`, `monospace-18` for `monospace 18`. Font size is in points; at the default 72 DPI, 1pt = 1px.
-- `x` — horizontal position:
-  - Positive number indicates position from the left, negative from the right
-  - Number followed by `p` e.g. `20p` means percentage of image width
-  - `left` or `l`, `right` or `r`, `center` for alignment, optionally with pixel offset e.g. `left-20`, `r-10`
-  - Float between 0–1 represents percentage e.g. `0.5` for center
-- `y` — vertical position:
-  - Positive number indicates position from the top, negative from the bottom
-  - Number followed by `p` e.g. `20p` means percentage of image height
-  - `top` or `t`, `bottom` or `b`, `center` for alignment, optionally with pixel offset e.g. `top-10`, `b-20`
-  - Float between 0–1 represents percentage e.g. `0.5` for center
 - `color` — color name or hexadecimal rgb expression without the `#` character, defaults to black
 - `alpha` — transparency, 0 (fully opaque) to 100 (fully transparent), defaults to 0
 - `blend_mode` — compositing blend mode, defaults to `normal`. Supported modes: `normal`, `multiply`, `screen`, `overlay`, `darken`, `lighten`, `color-dodge`, `color-burn`, `hard-light`, `soft-light`, `difference`, `exclusion`, `add`, `mask`, `mask-out`
@@ -461,16 +475,8 @@ Adds a watermark to the image. It can be positioned inside the image with the al
 
 - `image` — watermark image URI, using the same image loader configured for imagor.
   Use `b64:` prefix to encode image URLs with special characters as [base64url](https://developer.mozilla.org/en-US/docs/Glossary/Base64#url_and_filename_safe_base64).
-- `x` — horizontal position:
-  - Positive number indicates position from the left, negative from the right
-  - Number followed by `p` e.g. `20p` means percentage of image width
-  - `left`, `right`, `center` — positioned left, right or centered respectively
-  - `repeat` — the watermark will be repeated horizontally
-- `y` — vertical position:
-  - Positive number indicates position from the top, negative from the bottom
-  - Number followed by `p` e.g. `20p` means percentage of image height
-  - `top`, `bottom`, `center` — positioned top, bottom or centered respectively
-  - `repeat` — the watermark will be repeated vertically
+- `x` — horizontal position: see [Horizontal position](#horizontal-position)
+- `y` — vertical position: see [Vertical position](#vertical-position)
 - `alpha` — watermark image transparency, a number between 0 (fully opaque) and 100 (fully transparent)
 - `w_ratio` — percentage of the width of the image the watermark should fit-in
 - `h_ratio` — percentage of the height of the image the watermark should fit-in
@@ -488,6 +494,32 @@ Adds a watermark to the image. It can be positioned inside the image with the al
 
 ---
 
+## Position arguments
+
+`image()`, `text()` and `watermark()` place their overlay the same way, so they share these forms. A negative number insets from the far edge; an alignment offset such as `right-20` moves past it. The two go in opposite directions.
+
+These are position forms and not dimension forms: `full` and `full-N` belong to the dimension segment, and as a position are read as `0`, placing the overlay at the origin.
+
+### Horizontal position
+
+`x` takes one of these forms:
+
+- Positive number indicates position from the left, negative from the right
+- Number followed by `p` e.g. `20p` means percentage of image width
+- `left` or `l`, `right` or `r`, `center` for alignment, optionally offset past that edge e.g. `left-20`, `r-10`
+- `repeat` to tile horizontally
+- Float between 0–1 sets the left edge that far across: `0.5` is `50p`
+
+### Vertical position
+
+`y` takes one of these forms:
+
+- Positive number indicates position from the top, negative from the bottom
+- Number followed by `p` e.g. `20p` means percentage of image height
+- `top` or `t`, `bottom` or `b`, `center` for alignment, optionally offset past that edge e.g. `top-10`, `b-20`
+- `repeat` to tile vertically
+- Float between 0–1 sets the top edge that far down: `0.5` is `50p`
+
 ## Utility Filters
 
 These filters do not manipulate images but provide useful utilities to the imagor pipeline:
@@ -501,6 +533,20 @@ Returns the image as an attachment in the `Content-Disposition` header. The brow
 ### `expire(timestamp)`
 
 Adds expiration time to the content. `timestamp` is the unix milliseconds timestamp, e.g. if content is valid for 30s then timestamp would be `Date.now() + 30*1000` in JavaScript.
+
+---
+
+### `max_age(seconds)`
+
+Overrides the HTTP `Cache-Control` max-age of the response, in seconds. `seconds` takes precedence over the configured `IMAGOR_CACHE_HEADER_TTL` and is not capped by it, so it can both shorten and extend the cache lifetime of a single response.
+
+`max_age(0)` marks the response as non-cacheable, equivalent to `IMAGOR_CACHE_HEADER_NO_CACHE`. Negative or non-numeric values are ignored and the configured TTL applies.
+
+When combined with [`expire(timestamp)`](#expiretimestamp), the most restrictive of the two wins — the response is never cached past the `expire` deadline, nor for longer than `max_age`.
+
+:::warning
+With `IMAGOR_UNSAFE` enabled, anyone can craft a URL with an arbitrarily large `max_age`. Use URL signatures in production.
+:::
 
 ---
 
