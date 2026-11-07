@@ -1234,3 +1234,34 @@ func TestBaseImageCacheNoCropStillCaches(t *testing.T) {
 	_, found := v.cache.Get("gopher.png")
 	assert.True(t, found, "preview() + no-crop request must still populate the cache")
 }
+
+// Три вложенных image() подряд: прод отдавал на таком пути 400 из-за
+// edge-rewrite (двойной https://), но сам форк обязан их рендерить.
+func TestImageFilterThreeNestedLayers(t *testing.T) {
+	v := NewProcessor()
+
+	var mu sync.Mutex
+	var loaded []string
+	load := func(image string) (*imagor.Blob, error) {
+		mu.Lock()
+		loaded = append(loaded, image)
+		mu.Unlock()
+		return imagor.NewBlobFromFile("../../testdata/gopher.png"), nil
+	}
+
+	params := imagorpath.Parse(
+		"300x120/filters:image(90x90/a.png,0,0)" +
+			":image(90x90/b.png,100,0)" +
+			":image(90x90/c.png,200,0)/gopher.png",
+	)
+	require.Len(t, params.Filters, 3, "парсер должен вернуть три image()")
+	require.Equal(t, "gopher.png", params.Image)
+
+	result, err := v.Process(context.Background(), imagor.NewBlobFromFile("../../testdata/gopher.png"), params, load)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"a.png", "b.png", "c.png"}, loaded, "каждый вложенный источник должен загрузиться")
+}
