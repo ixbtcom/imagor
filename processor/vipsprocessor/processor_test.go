@@ -243,6 +243,38 @@ func TestProcessor(t *testing.T) {
 			assert.Contains(t, w.Body.String(), "read error")
 		})
 	})
+	// libjpeg reports benign quirks (extraneous bytes before a marker) as warnings.
+	// Browsers render such files, so fail_on=error must keep them: the deprecated
+	// fail=true boolean (fail_on=warning) turned them into hard 406/424 errors and
+	// the image "did not load" in production (2026-11-09).
+	t.Run("benign jpeg warning is tolerated", func(t *testing.T) {
+		full, err := os.ReadFile(filepath.Join(testDataDir, "demo1.jpg"))
+		require.NoError(t, err)
+		require.Greater(t, len(full), 3000)
+
+		junk := bytes.Repeat([]byte{0x11, 0x22, 0x33}, 38) // 114 bytes, as seen in production
+		damaged := append(append([]byte{}, full[:2]...), append(junk, full[2:]...)...)
+		require.Equal(t, len(full)+len(junk), len(damaged))
+
+		t.Run("thumbnail path", func(t *testing.T) {
+			params := imagorpath.Parse("/unsafe/fit-in/100x0/demo1.jpg")
+			result, err := v.Process(context.Background(), imagor.NewBlobFromBytes(damaged), params, nil)
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.False(t, result.IsEmpty())
+		})
+
+		t.Run("full image path", func(t *testing.T) {
+			img, err := v.NewImage(context.Background(), imagor.NewBlobFromBytes(damaged), 1, 1, 0)
+			require.NoError(t, err)
+			defer img.Close()
+
+			buf, err := img.WriteToMemory()
+			require.NoError(t, err)
+			assert.NotEmpty(t, buf)
+		})
+	})
 	t.Run("vips lossless filter", func(t *testing.T) {
 		var resultDir = filepath.Join(testDataDir, "golden")
 		doGoldenTests(t, resultDir, []test{

@@ -369,8 +369,12 @@ func (v *Processor) NewThumbnail(
 	size vips.Size, n, page int, dpi int,
 ) (*vips.Image, error) {
 	// A permissive decode can turn a prematurely closed HTTP body into a valid
-	// output container with duplicated or missing scanlines. Reject source errors.
-	var options = &vips.LoadOptions{FailOnError: true}
+	// output container with duplicated or missing scanlines, so errors and
+	// truncated streams are rejected. Warnings are tolerated on purpose: libjpeg
+	// reports benign quirks (e.g. "extraneous bytes before marker") that browsers
+	// render fine, while the deprecated fail=true boolean mapped them to
+	// fail_on=warning and turned those images into hard 406/424 errors.
+	var options = &vips.LoadOptions{FailOn: vips.FailOnError}
 	if dpi > 0 {
 		options.Dpi = dpi
 	}
@@ -447,8 +451,9 @@ func (v *Processor) newThumbnailFallback(
 
 // NewImage creates new Image from imagor.Blob
 func (v *Processor) NewImage(ctx context.Context, blob *imagor.Blob, n, page int, dpi int) (*vips.Image, error) {
-	// Match the thumbnail path: corrupt or truncated sources must not be encoded.
-	var options = &vips.LoadOptions{FailOnError: true}
+	// Match the thumbnail path: errors and truncated sources must not be encoded,
+	// warnings are tolerated (see NewThumbnail).
+	var options = &vips.LoadOptions{FailOn: vips.FailOnError}
 	if dpi > 0 {
 		options.Dpi = dpi
 	}
