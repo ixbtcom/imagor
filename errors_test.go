@@ -2,6 +2,8 @@ package imagor
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"net"
 	"net/http"
@@ -45,4 +47,34 @@ func TestWrapError(t *testing.T) {
 	assert.Equal(t, "imagor: forward 167x169/foo", err.Error())
 	assert.Equal(t, ErrUnsupportedFormat, WrapError(err))
 
+}
+
+func TestWrapErrorPermanentSourceFailures(t *testing.T) {
+	// Origin serves a certificate that does not match the source hostname: a
+	// legacy host such as mag.ixbt.com pointing to a foreign certificate.
+	certErr := &url.Error{
+		Op:  "Get",
+		URL: "https://mag.ixbt.com/img/topIpad.png",
+		Err: &tls.CertificateVerificationError{Err: x509.HostnameError{
+			Certificate: &x509.Certificate{}, Host: "mag.ixbt.com",
+		}},
+	}
+	e := WrapError(certErr)
+	assert.Equal(t, http.StatusNotFound, e.Code)
+	assert.Contains(t, e.Message, "certificate")
+
+	// Source hostname does not resolve.
+	e = WrapError(&url.Error{
+		Op:  "Get",
+		URL: "https://gone.invalid/x.png",
+		Err: &net.DNSError{Err: "no such host", Name: "gone.invalid", IsNotFound: true},
+	})
+	assert.Equal(t, http.StatusNotFound, e.Code)
+
+	// Unknown authority is permanent as well.
+	e = WrapError(x509.UnknownAuthorityError{})
+	assert.Equal(t, http.StatusNotFound, e.Code)
+
+	// Other generic failures stay internal errors.
+	assert.Equal(t, http.StatusInternalServerError, WrapError(errors.New("boom")).Code)
 }

@@ -2,8 +2,11 @@ package imagor
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -103,6 +106,13 @@ func WrapError(err error) Error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return ErrTimeout
 	}
+	// Permanent source failures (broken TLS certificate on the origin, NXDOMAIN)
+	// cannot be fixed by retrying: report them as 404 so the caller caches a short
+	// negative result instead of surfacing an internal error and alerting 5xx.
+	if isPermanentSourceError(err) {
+		msg := strings.Replace(err.Error(), "\n", "", -1)
+		return NewError(msg, http.StatusNotFound)
+	}
 	if msg := err.Error(); errMsgRegexp.MatchString(msg) {
 		if match := errMsgRegexp.FindStringSubmatch(msg); len(match) == 3 {
 			code, _ := strconv.Atoi(match[1])
@@ -111,4 +121,31 @@ func WrapError(err error) Error {
 	}
 	msg := strings.Replace(err.Error(), "\n", "", -1)
 	return NewError(msg, http.StatusInternalServerError)
+}
+
+// isPermanentSourceError reports whether err is a terminal source fetch failure:
+// the origin certificate cannot be verified for the requested hostname, or the
+// source hostname does not exist. Retrying such requests cannot succeed.
+func isPermanentSourceError(err error) bool {
+	var certErr *tls.CertificateVerificationError
+	if errors.As(err, &certErr) {
+		return true
+	}
+	var unknownAuthority x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuthority) {
+		return true
+	}
+	var hostnameErr x509.HostnameError
+	if errors.As(err, &hostnameErr) {
+		return true
+	}
+	var certInvalid x509.CertificateInvalidError
+	if errors.As(err, &certInvalid) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return true
+	}
+	return false
 }
